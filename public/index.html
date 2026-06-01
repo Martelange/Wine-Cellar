@@ -898,7 +898,7 @@ function syncClientsOdoo() {
 }
 
 function rechercherProduitOdoo(idx) {
-  const query = vins[idx].nom || '';
+  const query = prompt('Rechercher un vin dans Odoo :') || '';
   const resultsDiv = document.getElementById('odoo-results-'+idx);
   resultsDiv.style.display = 'block';
   resultsDiv.innerHTML = '<div style="padding:8px;color:#c9956a;font-size:.78rem;">⏳ Recherche...</div>';
