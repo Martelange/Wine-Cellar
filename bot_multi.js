@@ -535,7 +535,70 @@ async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe) {
   await verifierSeuils();
 }
 
-// ---------- EXPRESS ----------
+// ---------- PROGRAMMATION VENTE ----------
+let timerProgrammation = null;
+let programmationHeure = null;
+
+function annulerProgrammationServeur() {
+  if (timerProgrammation) {
+    clearTimeout(timerProgrammation);
+    timerProgrammation = null;
+  }
+  programmationHeure = null;
+  io.emit('programmation_status', null);
+}
+
+function programmerVenteServeur(heureISO, texteLibre, vins) {
+  annulerProgrammationServeur();
+
+  const cible = new Date(heureISO);
+  const delaiMs = cible - Date.now();
+  if (delaiMs <= 0) return { error: 'Heure déjà passée' };
+
+  programmationHeure = heureISO;
+  io.emit('programmation_status', { heureISO, texteLibre, vins });
+
+  timerProgrammation = setTimeout(async () => {
+    timerProgrammation = null;
+    programmationHeure = null;
+    io.emit('programmation_status', null);
+
+    // Lancer la vente automatiquement
+    const vinsAvecLettres = vins.map((vin, i) => ({
+      lettre: String.fromCharCode(65 + i),
+      nom: vin.nom || '', prix: vin.prix || '',
+      type: vin.type || '',
+      contenant: vin.contenant || 'bouteille',
+      stock: parseInt(vin.stock) || 0,
+      stockRestant: parseInt(vin.stock) || 0,
+      min: parseInt(vin.min) || 1,
+      max: parseInt(vin.max) || null,
+      odooId: vin.odooId || null
+    }));
+
+    state = etatInitial();
+    state.texteLibre = texteLibre || '';
+    state.vins = vinsAvecLettres;
+    state.venteActive = true;
+    state.dateVente = new Date().toISOString();
+    state.heureDebut = Date.now();
+    sauvegarderEtat();
+    io.emit('update', state);
+
+    try {
+      await whatsappClient.sendMessage(GROUPE_ID, construireMessageVente());
+      console.log('\nVente programmee lancee automatiquement : ' + vinsAvecLettres.length + ' vins');
+      io.emit('vente_lancee_auto');
+    } catch (e) {
+      console.log('Erreur envoi vente programmee :', e.message);
+    }
+  }, delaiMs);
+
+  console.log('Vente programmee a ' + cible.toLocaleTimeString('fr-BE') + ' (dans ' + Math.round(delaiMs / 60000) + ' min)');
+  return { ok: true, heureISO };
+}
+
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
@@ -657,7 +720,22 @@ app.delete('/api/clients/:numero', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/nouvelle-vente', requireAuth, async (req, res) => {
+app.post('/api/programmer-vente', requireAuth, (req, res) => {
+  const { heureISO, texteLibre, vins } = req.body;
+  if (!heureISO || !vins || vins.length === 0) return res.status(400).json({ error: 'Invalide' });
+  const result = programmerVenteServeur(heureISO, texteLibre, vins);
+  if (result.error) return res.status(400).json(result);
+  res.json(result);
+});
+
+app.post('/api/annuler-programmation', requireAuth, (req, res) => {
+  annulerProgrammationServeur();
+  res.json({ ok: true });
+});
+
+app.get('/api/programmation', requireAuth, (req, res) => {
+  res.json(programmationHeure ? { heureISO: programmationHeure } : null);
+});
   const { texteLibre, vins } = req.body;
   if (!vins || vins.length === 0) return res.status(400).json({ error: 'Aucun vin defini' });
 

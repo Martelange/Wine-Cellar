@@ -423,6 +423,23 @@ function initDashboard() {
     el.style.display='block';
     el.textContent='⚠️ '+suspects.length+' doublon(s) détecté(s) — vérifiez les lignes marquées';
   });
+  socket.on('programmation_status', data=>{
+    if(data && data.heureISO) afficherStatutProgrammation(data.heureISO);
+    else {
+      document.getElementById('prog-status').style.display='none';
+      document.getElementById('btn-annuler-prog').style.display='none';
+      if(countdownInterval){ clearInterval(countdownInterval); countdownInterval=null; }
+    }
+  });
+  socket.on('vente_lancee_auto', ()=>{
+    document.getElementById('prog-status').style.display='none';
+    document.getElementById('btn-annuler-prog').style.display='none';
+  });
+
+  // Récupérer la programmation existante au chargement
+  authFetch('/api/programmation').then(r=>r.json()).then(d=>{
+    if(d && d.heureISO) afficherStatutProgrammation(d.heureISO);
+  });
   socket.on('whatsapp_ready', ()=>{
     document.getElementById('wa-dot').className='dot active';
     document.getElementById('wa-label').textContent='WhatsApp connecté ✓';
@@ -813,6 +830,7 @@ function envoyerVente() {
 }
 
 // ── PROGRAMMATION ─────────────────────────────────────────────
+// ── PROGRAMMATION CÔTÉ SERVEUR ────────────────────────────────
 function programmerVente() {
   if(vins.length===0) return alert('Ajoute au moins un vin avant de programmer !');
   const heure=document.getElementById('heure-programmee').value;
@@ -821,25 +839,43 @@ function programmerVente() {
   const [h,m]=heure.split(':').map(Number);
   const cible=new Date(); cible.setHours(h,m,0,0);
   if(cible<=maintenant) cible.setDate(cible.getDate()+1);
-  const delaiMs=cible-maintenant;
-  const delaiMin=Math.round(delaiMs/60000);
+  const delaiMin=Math.round((cible-maintenant)/60000);
   if(!confirm('⏰ Programmer la vente à '+heure+' ?\n(dans '+(delaiMin<60?delaiMin+' min':Math.floor(delaiMin/60)+'h'+delaiMin%60+'min')+')')) return;
-  if(timerProgrammation) clearTimeout(timerProgrammation);
-  timerProgrammation=setTimeout(()=>{ envoyerVente(); timerProgrammation=null; document.getElementById('prog-status').style.display='none'; document.getElementById('btn-annuler-prog').style.display='none'; },delaiMs);
-  const status=document.getElementById('prog-status');
-  status.style.display='block'; document.getElementById('btn-annuler-prog').style.display='block';
-  const interval=setInterval(()=>{
-    if(!timerProgrammation){clearInterval(interval);return;}
-    const r=cible-new Date(); if(r<=0){clearInterval(interval);return;}
-    status.textContent='⏰ Vente à '+heure+' — dans '+Math.floor(r/60000)+'min '+Math.floor((r%60000)/1000)+'s';
-  },1000);
+
+  const texteLibre=document.getElementById('texte-libre').value.trim();
+  authFetch('/api/programmer-vente',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ heureISO: cible.toISOString(), texteLibre, vins })
+  }).then(r=>r.json()).then(d=>{
+    if(d.ok) afficherStatutProgrammation(cible.toISOString());
+    else alert('Erreur : '+(d.error||'inconnue'));
+  });
 }
 
 function annulerProgrammation() {
-  if(timerProgrammation){clearTimeout(timerProgrammation);timerProgrammation=null;}
-  document.getElementById('prog-status').style.display='none';
-  document.getElementById('btn-annuler-prog').style.display='none';
-  document.getElementById('heure-programmee').value='';
+  authFetch('/api/annuler-programmation',{method:'POST'}).then(()=>{
+    document.getElementById('prog-status').style.display='none';
+    document.getElementById('btn-annuler-prog').style.display='none';
+    document.getElementById('heure-programmee').value='';
+    if(countdownInterval) { clearInterval(countdownInterval); countdownInterval=null; }
+  });
+}
+
+let countdownInterval = null;
+
+function afficherStatutProgrammation(heureISO) {
+  const cible = new Date(heureISO);
+  const heure = cible.toLocaleTimeString('fr-BE', {hour:'2-digit',minute:'2-digit'});
+  const status=document.getElementById('prog-status');
+  status.style.display='block';
+  document.getElementById('btn-annuler-prog').style.display='block';
+
+  if(countdownInterval) clearInterval(countdownInterval);
+  countdownInterval = setInterval(()=>{
+    const r=cible-new Date();
+    if(r<=0){ clearInterval(countdownInterval); countdownInterval=null; status.textContent='⏰ Lancement en cours...'; return; }
+    status.textContent='⏰ Vente à '+heure+' — dans '+Math.floor(r/60000)+'min '+Math.floor((r%60000)/1000)+'s';
+  },1000);
 }
 
 function stopperVente() { if(confirm('Stopper la vente ?')) authFetch('/api/stopper',{method:'POST'}); }
@@ -862,26 +898,23 @@ function syncClientsOdoo() {
 }
 
 function rechercherProduitOdoo(idx) {
-  const query = prompt('Rechercher un vin dans Odoo :') || '';
+  const query = vins[idx].nom || '';
   const resultsDiv = document.getElementById('odoo-results-'+idx);
   resultsDiv.style.display = 'block';
   resultsDiv.innerHTML = '<div style="padding:8px;color:#c9956a;font-size:.78rem;">⏳ Recherche...</div>';
 
   authFetch('/api/odoo/produits?q='+encodeURIComponent(query)).then(r=>r.json()).then(produits=>{
     if(produits.length===0){
-      resultsDiv.innerHTML='<div style="padding:8px;color:#5c3317;font-size:.78rem;">Aucun produit trouvé pour "'+query+'"</div>';
+      resultsDiv.innerHTML='<div style="padding:8px;color:#5c3317;font-size:.78rem;">Aucun produit trouvé</div>';
       return;
     }
-    resultsDiv.innerHTML = '';
-    produits.forEach(p => {
-      const div = document.createElement('div');
-      div.style.cssText = 'padding:8px 10px;cursor:pointer;border-bottom:1px solid #2d1a0a;font-size:.82rem;';
-      div.innerHTML = '<strong>#' + p.id + '</strong> — ' + p.name + '<span style="color:#c9956a;float:right">' + p.list_price + '€</span>';
-      div.onmouseover = () => div.style.background = '#2d1a0a';
-      div.onmouseout = () => div.style.background = 'none';
-      div.onclick = () => selectionnerProduit(idx, p.id, p.name, p.list_price);
-      resultsDiv.appendChild(div);
-    });
+    resultsDiv.innerHTML = produits.map(p=>`
+      <div onclick="selectionnerProduit(${idx},${p.id},'${p.name.replace(/'/g,"\\'")}',${p.list_price})"
+        style="padding:8px 10px;cursor:pointer;border-bottom:1px solid #2d1a0a;font-size:.82rem;"
+        onmouseover="this.style.background='#2d1a0a'" onmouseout="this.style.background='none'">
+        <strong>#${p.id}</strong> — ${p.name}
+        <span style="color:#c9956a;float:right">${p.list_price}€</span>
+      </div>`).join('');
   });
 }
 
