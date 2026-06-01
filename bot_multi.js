@@ -535,6 +535,13 @@ const server = http.createServer(app);
 const io = new Server(server);
 app.use(express.json());
 
+// ✅ Renvoyer le dernier QR code aux nouveaux clients connectés au dashboard
+let dernierQrCode = null;
+io.on('connection', socket => {
+  if (dernierQrCode) socket.emit('qr_code', dernierQrCode);
+  socket.emit('update', state);
+});
+
 function requireAuth(req, res, next) {
   const token = req.headers['x-auth-token'] || req.query.token;
   if (token === DASHBOARD_PASSWORD) return next();
@@ -876,19 +883,18 @@ function demarrerWhatsApp() {
 
   whatsappClient = new Client({
     authStrategy: new LocalAuth(),
-    puppeteer: {
-      headless: true,
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-    }
+    puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] }
   });
 
   whatsappClient.on('qr', qr => {
-  console.log('QR Code recu, disponible sur le dashboard');
-  io.emit('qr_code', qr);
+    console.log('QR Code recu, disponible sur le dashboard');
+    dernierQrCode = qr;
+    io.emit('qr_needed');
+    io.emit('qr_code', qr);
   });
 
   whatsappClient.on('ready', async () => {
+    dernierQrCode = null;
     console.log('\nBot connecte ! Numero :', whatsappClient.info.wid.user);
     console.log('Dashboard : http://localhost:' + PORT + '\n');
     io.emit('whatsapp_ready');
