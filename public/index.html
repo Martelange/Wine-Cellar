@@ -862,23 +862,26 @@ function syncClientsOdoo() {
 }
 
 function rechercherProduitOdoo(idx) {
-  const query = vins[idx].nom || '';
+  const query = prompt('Rechercher un vin dans Odoo :') || '';
   const resultsDiv = document.getElementById('odoo-results-'+idx);
   resultsDiv.style.display = 'block';
   resultsDiv.innerHTML = '<div style="padding:8px;color:#c9956a;font-size:.78rem;">⏳ Recherche...</div>';
 
   authFetch('/api/odoo/produits?q='+encodeURIComponent(query)).then(r=>r.json()).then(produits=>{
     if(produits.length===0){
-      resultsDiv.innerHTML='<div style="padding:8px;color:#5c3317;font-size:.78rem;">Aucun produit trouvé</div>';
+      resultsDiv.innerHTML='<div style="padding:8px;color:#5c3317;font-size:.78rem;">Aucun produit trouvé pour "'+query+'"</div>';
       return;
     }
-    resultsDiv.innerHTML = produits.map(p=>`
-      <div onclick="selectionnerProduit(${idx},${p.id},'${p.name.replace(/'/g,"\\'")}',${p.list_price})"
-        style="padding:8px 10px;cursor:pointer;border-bottom:1px solid #2d1a0a;font-size:.82rem;"
-        onmouseover="this.style.background='#2d1a0a'" onmouseout="this.style.background='none'">
-        <strong>#${p.id}</strong> — ${p.name}
-        <span style="color:#c9956a;float:right">${p.list_price}€</span>
-      </div>`).join('');
+    resultsDiv.innerHTML = '';
+    produits.forEach(p => {
+      const div = document.createElement('div');
+      div.style.cssText = 'padding:8px 10px;cursor:pointer;border-bottom:1px solid #2d1a0a;font-size:.82rem;';
+      div.innerHTML = '<strong>#' + p.id + '</strong> — ' + p.name + '<span style="color:#c9956a;float:right">' + p.list_price + '€</span>';
+      div.onmouseover = () => div.style.background = '#2d1a0a';
+      div.onmouseout = () => div.style.background = 'none';
+      div.onclick = () => selectionnerProduit(idx, p.id, p.name, p.list_price);
+      resultsDiv.appendChild(div);
+    });
   });
 }
 
