@@ -884,9 +884,8 @@ function demarrerWhatsApp() {
   });
 
   whatsappClient.on('qr', qr => {
-    console.log('\nScanne ce QR code :\n');
-    qrcode.generate(qr, { small: true });
-    io.emit('qr_needed');
+  console.log('QR Code recu, disponible sur le dashboard');
+  io.emit('qr_code', qr);
   });
 
   whatsappClient.on('ready', async () => {

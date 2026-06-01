@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Wine Cellar – Vente Multi-Vins</title>
   <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'Segoe UI', sans-serif; background: #1a0a00; color: #f5e6d0; min-height: 100vh; }
@@ -422,9 +423,38 @@ function initDashboard() {
     el.style.display='block';
     el.textContent='⚠️ '+suspects.length+' doublon(s) détecté(s) — vérifiez les lignes marquées';
   });
-  socket.on('whatsapp_ready', ()=>{ document.getElementById('wa-dot').className='dot active'; document.getElementById('wa-label').textContent='WhatsApp connecté ✓'; });
+  socket.on('whatsapp_ready', ()=>{
+    document.getElementById('wa-dot').className='dot active';
+    document.getElementById('wa-label').textContent='WhatsApp connecté ✓';
+    // Fermer le modal QR si ouvert
+    const qrModal = document.getElementById('qr-modal');
+    if(qrModal) qrModal.remove();
+  });
   socket.on('whatsapp_disconnected', ()=>{ document.getElementById('wa-dot').className='dot sold'; document.getElementById('wa-label').textContent='Déconnecté'; });
   socket.on('qr_needed', ()=>{ document.getElementById('wa-dot').className='dot waiting'; document.getElementById('wa-label').textContent='Scan QR...'; });
+  socket.on('qr_code', qr => {
+    document.getElementById('wa-dot').className='dot waiting';
+    document.getElementById('wa-label').textContent='Scan QR...';
+    // Supprimer ancien modal si existe
+    const ancien = document.getElementById('qr-modal');
+    if(ancien) ancien.remove();
+    // Creer modal QR
+    const modal = document.createElement('div');
+    modal.id = 'qr-modal';
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;';
+    modal.innerHTML = `
+      <div style="background:#2d1a0a;border:2px solid #f5c842;border-radius:16px;padding:32px;text-align:center;">
+        <h2 style="color:#f5c842;margin-bottom:8px;">📱 Connecter WhatsApp</h2>
+        <p style="color:#c9956a;font-size:.85rem;margin-bottom:20px;">Ouvre WhatsApp → Appareils connectés → Connecter un appareil</p>
+        <div id="qr-canvas-container" style="background:white;padding:12px;border-radius:8px;display:inline-block;"></div>
+        <p style="color:#5c3317;font-size:.75rem;margin-top:12px;">Le QR code expire après 60 secondes</p>
+      </div>`;
+    document.body.appendChild(modal);
+    new QRCode(document.getElementById('qr-canvas-container'), {
+      text: qr, width: 280, height: 280,
+      colorDark: '#000000', colorLight: '#ffffff'
+    });
+  });
 }
 
 function updateUI(s) {
@@ -832,26 +862,23 @@ function syncClientsOdoo() {
 }
 
 function rechercherProduitOdoo(idx) {
-  const query = prompt('Rechercher un vin dans Odoo :') || '';
+  const query = vins[idx].nom || '';
   const resultsDiv = document.getElementById('odoo-results-'+idx);
   resultsDiv.style.display = 'block';
   resultsDiv.innerHTML = '<div style="padding:8px;color:#c9956a;font-size:.78rem;">⏳ Recherche...</div>';
 
   authFetch('/api/odoo/produits?q='+encodeURIComponent(query)).then(r=>r.json()).then(produits=>{
     if(produits.length===0){
-      resultsDiv.innerHTML='<div style="padding:8px;color:#5c3317;font-size:.78rem;">Aucun produit trouvé pour "'+query+'"</div>';
+      resultsDiv.innerHTML='<div style="padding:8px;color:#5c3317;font-size:.78rem;">Aucun produit trouvé</div>';
       return;
     }
-    resultsDiv.innerHTML = '';
-    produits.forEach(p => {
-      const div = document.createElement('div');
-      div.style.cssText = 'padding:8px 10px;cursor:pointer;border-bottom:1px solid #2d1a0a;font-size:.82rem;';
-      div.innerHTML = '<strong>#' + p.id + '</strong> — ' + p.name + '<span style="color:#c9956a;float:right">' + p.list_price + '€</span>';
-      div.onmouseover = () => div.style.background = '#2d1a0a';
-      div.onmouseout = () => div.style.background = 'none';
-      div.onclick = () => selectionnerProduit(idx, p.id, p.name, p.list_price);
-      resultsDiv.appendChild(div);
-    });
+    resultsDiv.innerHTML = produits.map(p=>`
+      <div onclick="selectionnerProduit(${idx},${p.id},'${p.name.replace(/'/g,"\\'")}',${p.list_price})"
+        style="padding:8px 10px;cursor:pointer;border-bottom:1px solid #2d1a0a;font-size:.82rem;"
+        onmouseover="this.style.background='#2d1a0a'" onmouseout="this.style.background='none'">
+        <strong>#${p.id}</strong> — ${p.name}
+        <span style="color:#c9956a;float:right">${p.list_price}€</span>
+      </div>`).join('');
   });
 }
 
