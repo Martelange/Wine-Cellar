@@ -1,8 +1,12 @@
 [phases.setup]
-nixPkgs = ["glib", "nss", "nspr", "atk", "cups", "dbus", "expat", "libdrm", "libxcb", "libxkbcommon", "mesa", "libGL", "pango", "cairo", "alsa-lib", "chromium"]
+nixPkgs = ["chromium", "glib", "nss", "nspr", "atk", "cups", "dbus", "libdrm", "libxcb", "libxkbcommon", "pango", "cairo", "alsa-lib"]
 
-[phases.build]
-cmds = ["npm install"]
+[phases.install]
+cmds = ["npm ci"]
 
 [start]
 cmd = "node bot_multi.js"
+
+[variables]
+PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true"
+PUPPETEER_EXECUTABLE_PATH = "/run/current-system/sw/bin/chromium"
