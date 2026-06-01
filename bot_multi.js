@@ -33,6 +33,10 @@ const TAGS_TYPE = { rouge: 'ROUGE', blanc: 'BLANC', rose: 'ROSE', orange: 'ORANG
 // ---------- ODOO API — xmlrpc npm ----------
 const xmlrpc = require('xmlrpc');
 
+console.log('ENV CHECK - GROUPE_ID:', process.env.GROUPE_ID ? 'OK' : 'MANQUANT');
+console.log('ENV CHECK - PORT:', process.env.PORT);
+console.log('ENV CHECK - ODOO_DB:', process.env.ODOO_DB);
+
 let odooUid = null;
 
 function createOdooClient(path) {
