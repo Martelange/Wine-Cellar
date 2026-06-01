@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wine Cellar – Vente Multi-Vins</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', sans-serif; background: #1a0a00; color: #f5e6d0; min-height: 100vh; }
+
+    #login-screen { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+    .login-card { background: #2d1a0a; border: 1px solid #5c3317; border-radius: 16px; padding: 40px; width: 340px; text-align: center; }
+    .login-card h1 { font-size: 1.5rem; color: #f5c842; margin-bottom: 6px; }
+    .login-card p { color: #c9956a; font-size: 0.85rem; margin-bottom: 24px; }
+    .login-input { width: 100%; background: #1a0a00; border: 1px solid #5c3317; border-radius: 8px; padding: 12px; color: #f5e6d0; font-size: 1.1rem; text-align: center; letter-spacing: 4px; margin-bottom: 12px; }
+    .login-input:focus { outline: none; border-color: #f5c842; }
+    .login-error { color: #f44336; font-size: 0.82rem; margin-top: 10px; display: none; }
+
+    #dashboard { display: none; }
+    header { background: linear-gradient(135deg, #6b1a1a, #2d0d0d); padding: 16px 24px; display: flex; align-items: center; gap: 12px; border-bottom: 2px solid #8b3a3a; }
+    header h1 { font-size: 1.2rem; letter-spacing: 1px; }
+    .dot { width: 11px; height: 11px; border-radius: 50%; background: #555; flex-shrink: 0; }
+    .dot.active { background: #4caf50; box-shadow: 0 0 8px #4caf50; animation: pulse 1.5s infinite; }
+    .dot.sold { background: #f44336; box-shadow: 0 0 8px #f44336; }
+    .dot.waiting { background: #ff9800; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    .wa-status { margin-left: auto; font-size: 0.78rem; color: #c9956a; display: flex; align-items: center; gap: 6px; }
+    .logout-btn { margin-left: 12px; background: none; border: 1px solid #5c3317; color: #c9956a; border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 0.75rem; }
+    .logout-btn:hover { border-color: #f44336; color: #f44336; }
+
+    .page { display: grid; grid-template-columns: 420px 1fr; gap: 16px; padding: 16px; max-width: 1400px; margin: 0 auto; }
+    .card { background: #2d1a0a; border: 1px solid #5c3317; border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+    .card:last-child { margin-bottom: 0; }
+    .card-title { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 2px; color: #c9956a; margin-bottom: 14px; }
+
+    label { display: block; font-size: 0.78rem; color: #c9956a; margin: 8px 0 3px; }
+    input, textarea, select { width: 100%; background: #1a0a00; border: 1px solid #5c3317; border-radius: 6px; padding: 7px 10px; color: #f5e6d0; font-size: 0.85rem; font-family: inherit; }
+    input:focus, textarea:focus, select:focus { outline: none; border-color: #f5c842; }
+    textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
+    select option { background: #2d1a0a; }
+
+    .vin-card { background: #1a0a00; border: 1px solid #5c3317; border-radius: 10px; padding: 14px; margin-bottom: 10px; }
+    .vin-card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .vin-lettre { width: 32px; height: 32px; background: #f5c842; color: #1a0a00; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 1rem; flex-shrink: 0; }
+    .vin-card-title { font-size: 0.88rem; font-weight: 600; color: #f5e6d0; flex: 1; }
+    .remove-vin { background: none; border: none; color: #5c3317; cursor: pointer; font-size: 1.1rem; padding: 4px; }
+    .remove-vin:hover { color: #f44336; }
+    .vin-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px; }
+
+    .btn { width: 100%; padding: 10px; border-radius: 8px; border: none; cursor: pointer; font-size: 0.85rem; font-weight: 600; margin-top: 8px; transition: opacity .2s; }
+    .btn:hover { opacity: .85; }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .btn-add { background: #2d1a0a; border: 1px dashed #5c3317; color: #c9956a; margin-top: 4px; }
+    .btn-add:hover { border-color: #f5c842; color: #f5c842; opacity: 1; }
+    .btn-start { background: #4caf50; color: white; }
+    .btn-stop { background: #c62828; color: white; }
+    .btn-stocks { background: #1565c0; color: white; }
+    .btn-export { background: #f5c842; color: #1a0a00; }
+
+    .stocks-grid { display: flex; flex-direction: column; gap: 10px; }
+    .stock-vin { background: #1a0a00; border: 1px solid #5c3317; border-radius: 10px; padding: 12px; }
+    .stock-vin-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .stock-vin-lettre { width: 28px; height: 28px; background: #f5c842; color: #1a0a00; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.9rem; flex-shrink: 0; }
+    .stock-vin-nom { font-size: 0.85rem; font-weight: 600; flex: 1; }
+    .stock-vin-nb { font-size: 1.3rem; font-weight: 700; color: #f5c842; }
+    .stock-bar { background: #2d1a0a; border-radius: 20px; height: 8px; overflow: hidden; }
+    .stock-bar-fill { height: 100%; border-radius: 20px; background: linear-gradient(90deg, #4caf50, #8bc34a); transition: width .5s; }
+    .stock-bar-fill.warn { background: linear-gradient(90deg, #ff9800, #ffc107); }
+    .stock-bar-fill.danger { background: linear-gradient(90deg, #f44336, #ff5722); }
+    .sold-out-tag { background: #c62828; color: white; font-size: 0.7rem; padding: 2px 6px; border-radius: 4px; }
+
+    .stats-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+    .stat { background: #1a0a00; border-radius: 8px; padding: 10px; text-align: center; }
+    .stat-val { font-size: 1.4rem; font-weight: 700; color: #f5c842; }
+    .stat-lbl { font-size: 0.65rem; color: #c9956a; text-transform: uppercase; letter-spacing: 1px; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    thead th { text-align: left; padding: 7px 10px; color: #c9956a; font-weight: 600; border-bottom: 1px solid #5c3317; font-size: 0.7rem; text-transform: uppercase; }
+    tbody tr { border-bottom: 1px solid #1a0a00; transition: background .15s; }
+    tbody tr:hover { background: #3d2010; }
+    tbody tr.new-row { animation: hl .9s ease; }
+    tbody tr.suspect { background: #3d1a00 !important; }
+    @keyframes hl { from{background:#7a3a10} to{background:transparent} }
+    td { padding: 7px 10px; }
+    .badge { display: inline-block; border-radius: 4px; padding: 2px 6px; font-size: 0.72rem; }
+    .badge-lettre { background: #f5c842; color: #1a0a00; font-weight: 700; }
+    .badge-prive { background: #1a2a3d; color: #64b5f6; }
+    .badge-groupe { background: #2d1a3d; color: #ce93d8; }
+    .badge-odoo { background: #3d2a0a; color: #ffb74d; }
+    .badge-manuel { background: #1a3d1a; color: #66bb6a; }
+    .badge-edit { background: #1a1a3d; color: #64b5f6; }
+    .empty-msg { text-align: center; color: #4a2a10; padding: 30px; font-style: italic; }
+    .warn-msg { background: #3d2a00; border: 1px solid #ff9800; border-radius: 8px; padding: 8px 12px; font-size: 0.8rem; color: #ffb74d; margin-top: 8px; display: none; }
+    .alert-box { background: #3d1a00; border: 1px solid #ff9800; border-radius: 8px; padding: 8px 12px; margin-bottom: 10px; font-size: 0.8rem; color: #ffb74d; display: none; }
+
+    /* Programmation */
+    .prog-box { margin-top: 10px; background: #1a0a00; border: 1px solid #5c3317; border-radius: 8px; padding: 12px; }
+    .prog-box label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px; color: #c9956a; margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="login-screen">
+  <div class="login-card">
+    <h1>🍷 Wine Cellar</h1>
+    <p>Code d'accès</p>
+    <input type="password" class="login-input" id="login-input" placeholder="••••••••" maxlength="30">
+    <button class="btn btn-start" style="margin-top:0" onclick="login()">Accéder</button>
+    <div class="login-error" id="login-error">Code incorrect.</div>
+  </div>
+</div>
+
+<!-- MODAL AJOUT MANUEL -->
+<div id="modal-manuel" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:100;align-items:center;justify-content:center;">
+  <div style="background:#2d1a0a;border:1px solid #5c3317;border-radius:14px;padding:24px;width:420px;max-width:90vw;">
+    <h3 style="color:#f5c842;margin-bottom:16px;">✏️ Ajout manuel</h3>
+    <label>Rechercher un client Odoo</label>
+    <div style="display:grid;grid-template-columns:1fr auto;gap:6px;margin-bottom:4px;">
+      <input type="text" id="manuel-recherche" placeholder="Nom ou numéro..." oninput="rechercherClientOdoo()">
+      <button onclick="rechercherClientOdoo()" style="background:#5c3317;border:none;color:#f5e6d0;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:.78rem;">🔍</button>
+    </div>
+    <div id="manuel-client-results" style="display:none;background:#1a0a00;border:1px solid #5c3317;border-radius:6px;margin-bottom:8px;max-height:120px;overflow-y:auto;"></div>
+    <label>Numéro de téléphone *</label>
+    <input type="text" id="manuel-numero" placeholder="32477123456">
+    <label>Nom</label>
+    <input type="text" id="manuel-nom" placeholder="Jean Dupont">
+    <input type="hidden" id="manuel-odoo-id">
+    <div style="margin-top:12px;margin-bottom:6px;font-size:0.78rem;color:#c9956a;text-transform:uppercase;letter-spacing:1px;">Lignes de commande</div>
+    <div id="manuel-lignes"></div>
+    <button onclick="ajouterLigneManuelle()" style="background:none;border:1px dashed #5c3317;color:#c9956a;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:.78rem;margin-top:4px;width:100%;">+ Ajouter un vin</button>
+    <div style="display:flex;gap:8px;margin-top:14px;">
+      <button onclick="fermerModal()" style="flex:1;padding:9px;border-radius:8px;border:none;background:#3d2010;color:#c9956a;cursor:pointer;">Annuler</button>
+      <button onclick="soumettreManuel()" style="flex:1;padding:9px;border-radius:8px;border:none;background:#4caf50;color:white;cursor:pointer;font-weight:600;">✅ Valider</button>
+    </div>
+  </div>
+</div>
+
+<!-- DASHBOARD -->
+<div id="dashboard">
+  <header>
+    <div class="dot" id="status-dot"></div>
+    <h1>🍷 Wine Cellar – Vente Multi-Vins</h1>
+    <div class="wa-status">
+      <div class="dot waiting" id="wa-dot"></div>
+      <span id="wa-label">Connexion...</span>
+    </div>
+    <button class="logout-btn" onclick="logout()">Déconnexion</button>
+  </header>
+
+  <div class="page">
+    <!-- COLONNE GAUCHE -->
+    <div>
+
+      <!-- 1. STOCKS -->
+      <div class="card">
+        <div class="card-title">Stocks en temps réel</div>
+        <div class="stats-row">
+          <div class="stat"><div class="stat-val" id="stat-commandes">0</div><div class="stat-lbl">Commandes</div></div>
+          <div class="stat"><div class="stat-val" id="stat-vendues">0</div><div class="stat-lbl">Vendues</div></div>
+          <div class="stat"><div class="stat-val" id="stat-restant">—</div><div class="stat-lbl">Restantes</div></div>
+        </div>
+        <div class="stocks-grid" id="stocks-grid">
+          <div class="empty-msg">Aucune vente en cours</div>
+        </div>
+      </div>
+
+      <!-- 2. ACTIONS -->
+      <div class="card">
+        <div class="card-title">Actions</div>
+        <div class="warn-msg" id="warn-msg"></div>
+        <button class="btn btn-start" id="btn-start" onclick="lancerVente()">⚡ Lancer la vente maintenant</button>
+
+        <div class="prog-box">
+          <label>⏰ Programmer la vente</label>
+          <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end;margin-top:6px;">
+            <div>
+              <label>Heure de lancement</label>
+              <input type="time" id="heure-programmee">
+            </div>
+            <button onclick="programmerVente()" style="background:#5c3317;border:none;color:#f5e6d0;border-radius:6px;padding:7px 14px;cursor:pointer;white-space:nowrap;">Programmer</button>
+          </div>
+          <div id="prog-status" style="display:none;margin-top:8px;font-size:.82rem;color:#f5c842;"></div>
+          <button id="btn-annuler-prog" onclick="annulerProgrammation()" style="display:none;background:none;border:none;color:#f44336;font-size:.78rem;cursor:pointer;margin-top:4px;">✕ Annuler</button>
+        </div>
+
+        <button class="btn btn-stocks" onclick="envoyerStocks()">📊 Envoyer l'état des stocks</button>
+        <button class="btn btn-stop" onclick="stopperVente()">⏹ Stopper la vente</button>
+        <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <button class="btn btn-export" style="margin-top:0" onclick="exporterCSV()">📥 Export CSV</button>
+          <button class="btn" style="margin-top:0;background:#7b1fa2;color:white;" onclick="creerSalesOrders()">🔗 Créer SO Odoo</button>
+        </div>
+        <button onclick="syncClientsOdoo()" style="width:100%;margin-top:8px;padding:6px;border-radius:6px;border:1px solid #5c3317;background:none;color:#c9956a;cursor:pointer;font-size:.78rem;">🔄 Synchroniser clients Odoo</button>
+        <div id="sync-status" style="font-size:.75rem;color:#5c3317;margin-top:4px;display:none;"></div>
+      </div>
+
+      <!-- 3. PARAMETRAGE -->
+      <div class="card">
+        <div class="card-title">Paramétrage de la vente</div>
+        <label>Texte libre (introduction)</label>
+        <textarea id="texte-libre" placeholder="Voici notre sélection du moment..." rows="3"></textarea>
+        <div style="margin-top:14px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;">
+          <span style="font-size:0.75rem;text-transform:uppercase;letter-spacing:2px;color:#c9956a;">Vins en vente</span>
+          <span style="font-size:0.72rem;color:#5c3317;" id="vins-count"></span>
+        </div>
+        <div id="vins-list"></div>
+        <button class="btn btn-add" onclick="ajouterVin()">+ Ajouter un vin</button>
+      </div>
+
+    </div>
+
+    <!-- COLONNE DROITE -->
+    <div style="display:flex;flex-direction:column;gap:16px;">
+
+      <!-- Onglets -->
+      <div style="display:flex;gap:8px;">
+        <button id="tab-commandes" onclick="switchTab('commandes')" style="flex:1;padding:8px;border-radius:8px;border:none;cursor:pointer;font-size:.85rem;font-weight:600;background:#f5c842;color:#1a0a00;">📋 Commandes</button>
+        <button id="tab-consolidation" onclick="switchTab('consolidation')" style="flex:1;padding:8px;border-radius:8px;border:none;cursor:pointer;font-size:.85rem;font-weight:600;background:#2d1a0a;color:#c9956a;border:1px solid #5c3317;">📊 Consolidation</button>
+      </div>
+
+      <!-- Vue commandes -->
+      <div id="vue-commandes" class="card" style="height:calc(100vh - 180px);overflow:auto;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <div class="card-title" style="margin-bottom:0;">Commandes <span id="cmd-count" style="color:#5c3317;"></span></div>
+          <button onclick="ouvrirAjoutManuel()" style="background:#5c3317;border:none;color:#f5e6d0;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:.78rem;">+ Ajout manuel</button>
+        </div>
+        <div id="doublons-alert" class="alert-box"></div>
+        <div id="empty-cmd" class="empty-msg">En attente des premières commandes...</div>
+        <table id="cmd-table" style="display:none">
+          <thead>
+            <tr><th>#</th><th>Heure</th><th>Contact</th><th>Commande</th><th>Source</th><th></th></tr>
+          </thead>
+          <tbody id="cmd-body"></tbody>
+        </table>
+      </div>
+
+      <!-- Vue consolidation -->
+      <div id="vue-consolidation" class="card" style="height:calc(100vh - 180px);overflow:auto;display:none;">
+        <div class="card-title" style="display:flex;justify-content:space-between;">
+          <span>Consolidation par client</span>
+          <span id="consol-count" style="color:#5c3317;"></span>
+        </div>
+        <div id="empty-consol" class="empty-msg">Aucune commande à consolider</div>
+        <table id="consol-table" style="display:none">
+          <thead>
+            <tr><th>Contact</th><th>Lettre</th><th>Vin</th><th>Total</th><th>Odoo</th></tr>
+          </thead>
+          <tbody id="consol-body"></tbody>
+        </table>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+// ── CONSTANTES ────────────────────────────────────────────────
+const CONTENANTS = [
+  {v:'bouteille', l:'Bouteille (75cl)'},
+  {v:'magnum',    l:'Magnum (1.5L)'},
+  {v:'jeroboam', l:'Jéroboam (3L)'}
+];
+const TYPES_VIN = [
+  {v:'',          l:'— Type de vin —'},
+  {v:'rouge',     l:'🔴 Rouge'},
+  {v:'blanc',     l:'⚪ Blanc'},
+  {v:'rose',      l:'🌸 Rosé'},
+  {v:'orange',    l:'🟠 Orange'},
+  {v:'petillant', l:'🫧 Pétillant'}
+];
+
+// ── AUTH ──────────────────────────────────────────────────────
+let authToken = sessionStorage.getItem('wc_token');
+
+function login() {
+  const pwd = document.getElementById('login-input').value;
+  fetch('/api/login', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pwd})})
+    .then(r=>r.json()).then(d=>{
+      if(d.ok){authToken=d.token;sessionStorage.setItem('wc_token',authToken);afficherDashboard();}
+      else document.getElementById('login-error').style.display='block';
+    }).catch(()=>document.getElementById('login-error').style.display='block');
+}
+
+function logout() {
+  sessionStorage.removeItem('wc_token');authToken=null;
+  document.getElementById('dashboard').style.display='none';
+  document.getElementById('login-screen').style.display='flex';
+  document.getElementById('login-input').value='';
+}
+
+function authFetch(url, opts={}) {
+  opts.headers=opts.headers||{};
+  opts.headers['x-auth-token']=authToken;
+  return fetch(url,opts);
+}
+
+document.getElementById('login-input').addEventListener('keydown',e=>{if(e.key==='Enter')login();});
+if(authToken) afficherDashboard();
+
+// ── VINS (formulaire) ─────────────────────────────────────────
+let vins = [];
+
+function ajouterVin(data={}) {
+  vins.push({nom:data.nom||'',type:data.type||'',prix:data.prix||'',contenant:data.contenant||'bouteille',stock:data.stock||'',min:data.min||'',max:data.max||'',odooId:data.odooId||''});
+  renderVins();
+}
+
+function supprimerVin(i) { vins.splice(i,1); renderVins(); }
+
+function renderVins() {
+  const container = document.getElementById('vins-list');
+  document.getElementById('vins-count').textContent = vins.length+' vin'+(vins.length>1?'s':'');
+  container.innerHTML='';
+  vins.forEach((vin,i)=>{
+    const lettre = String.fromCharCode(65+i);
+    const div = document.createElement('div');
+    div.className='vin-card';
+    div.innerHTML=`
+      <div class="vin-card-header">
+        <div class="vin-lettre">${lettre}</div>
+        <span class="vin-card-title">${vin.nom||'Nouveau vin'}</span>
+        <button class="remove-vin" onclick="supprimerVin(${i})">✕</button>
+      </div>
+      <div>
+        <label>Nom / description *</label>
+        <input type="text" value="${vin.nom||''}" placeholder="Pfalz Chardonnay 2025"
+          oninput="vins[${i}].nom=this.value;document.querySelectorAll('.vin-card-title')[${i}].textContent=this.value||'Nouveau vin'">
+      </div>
+      <div class="vin-grid">
+        <div>
+          <label>Type de vin</label>
+          <select onchange="vins[${i}].type=this.value">
+            ${TYPES_VIN.map(t=>`<option value="${t.v}"${vin.type===t.v?' selected':''}>${t.l}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label>Contenant</label>
+          <select onchange="vins[${i}].contenant=this.value">
+            ${CONTENANTS.map(c=>`<option value="${c.v}"${vin.contenant===c.v?' selected':''}>${c.l}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="vin-grid">
+        <div>
+          <label>Prix (€ excl. TVA) *</label>
+          <input type="number" value="${vin.prix||''}" placeholder="12" min="0" step="0.01" oninput="vins[${i}].prix=this.value">
+        </div>
+        <div>
+          <label>Stock *</label>
+          <input type="number" value="${vin.stock||''}" placeholder="90" min="1" oninput="vins[${i}].stock=this.value">
+        </div>
+      </div>
+      <div class="vin-grid">
+        <div>
+          <label>Min / commande</label>
+          <input type="number" value="${vin.min||''}" placeholder="—" min="1" oninput="vins[${i}].min=this.value">
+        </div>
+        <div>
+          <label>Max / client</label>
+          <input type="number" value="${vin.max||''}" placeholder="—" min="1" oninput="vins[${i}].max=this.value">
+        </div>
+      </div>
+      <div>
+        <label>ID Produit Odoo</label>
+        <div style="display:grid;grid-template-columns:1fr auto;gap:6px;">
+          <input type="text" value="${vin.odooId||''}" placeholder="ex: 1042" id="odoo-id-${i}" oninput="vins[${i}].odooId=this.value">
+          <button onclick="rechercherProduitOdoo(${i})" style="background:#5c3317;border:none;color:#f5e6d0;border-radius:6px;padding:6px 10px;cursor:pointer;white-space:nowrap;font-size:.78rem;">🔍 Odoo</button>
+        </div>
+        <div id="odoo-results-${i}" style="display:none;background:#1a0a00;border:1px solid #5c3317;border-radius:6px;margin-top:4px;max-height:150px;overflow-y:auto;"></div>
+      </div>`;
+    container.appendChild(div);
+  });
+}
+
+// ── DASHBOARD ─────────────────────────────────────────────────
+let state = null;
+let socket = null;
+let timerProgrammation = null;
+
+function afficherDashboard() {
+  document.getElementById('login-screen').style.display='none';
+  document.getElementById('dashboard').style.display='block';
+  initDashboard();
+}
+
+function initDashboard() {
+  socket=io();
+  authFetch('/api/etat').then(r=>r.json()).then(updateUI);
+  socket.on('update', updateUI);
+  socket.on('nouvelle_commande', c=>{ if(!state)return; ajouterLigneCmd(c,state.commandes.length,true); });
+  socket.on('sold_out', ()=>{ document.getElementById('status-dot').className='dot sold'; });
+  socket.on('doublons_detectes', suspects=>{
+    const el=document.getElementById('doublons-alert');
+    el.style.display='block';
+    el.textContent='⚠️ '+suspects.length+' doublon(s) détecté(s) — vérifiez les lignes marquées';
+  });
+  socket.on('whatsapp_ready', ()=>{ document.getElementById('wa-dot').className='dot active'; document.getElementById('wa-label').textContent='WhatsApp connecté ✓'; });
+  socket.on('whatsapp_disconnected', ()=>{ document.getElementById('wa-dot').className='dot sold'; document.getElementById('wa-label').textContent='Déconnecté'; });
+  socket.on('qr_needed', ()=>{ document.getElementById('wa-dot').className='dot waiting'; document.getElementById('wa-label').textContent='Scan QR...'; });
+}
+
+function updateUI(s) {
+  state=s;
+  document.getElementById('status-dot').className='dot'+(s.venteActive?' active':'');
+  const totalRestant=s.vins?s.vins.reduce((a,v)=>a+v.stockRestant,0):0;
+  const totalInitial=s.vins?s.vins.reduce((a,v)=>a+v.stock,0):0;
+  document.getElementById('stat-commandes').textContent=s.commandes?s.commandes.length:0;
+  document.getElementById('stat-vendues').textContent=totalInitial-totalRestant;
+  document.getElementById('stat-restant').textContent=totalRestant;
+
+  const grid=document.getElementById('stocks-grid');
+  if(s.vins&&s.vins.length>0){
+    grid.innerHTML='';
+    s.vins.forEach(vin=>{
+      const pct=vin.stock>0?Math.round((vin.stockRestant/vin.stock)*100):0;
+      const cls=pct<20?'danger':pct<50?'warn':'';
+      const div=document.createElement('div');
+      div.className='stock-vin';
+      div.innerHTML=`
+        <div class="stock-vin-header">
+          <div class="stock-vin-lettre">${vin.lettre}</div>
+          <div class="stock-vin-nom">${vin.nom}</div>
+          ${vin.stockRestant===0?'<span class="sold-out-tag">SOLD OUT</span>':''}
+          <div class="stock-vin-nb">${vin.stockRestant}<span style="font-size:.75rem;color:#c9956a;font-weight:400">/${vin.stock}</span></div>
+        </div>
+        <div class="stock-bar"><div class="stock-bar-fill ${cls}" style="width:${pct}%"></div></div>
+        <div style="display:flex;justify-content:space-between;font-size:.7rem;color:#5c3317;margin-top:3px">
+          <span>${vin.prix}€ / ${vin.contenant}</span><span>${pct}% restant</span>
+        </div>`;
+      grid.appendChild(div);
+    });
+  } else { grid.innerHTML='<div class="empty-msg">Aucune vente en cours</div>'; }
+
+  if(s.commandes&&s.commandes.length>0){
+    document.getElementById('empty-cmd').style.display='none';
+    document.getElementById('cmd-table').style.display='table';
+    document.getElementById('cmd-count').textContent='('+s.commandes.length+')';
+    const tbody=document.getElementById('cmd-body');
+    tbody.innerHTML='';
+    [...s.commandes].reverse().forEach((c,i)=>ajouterLigneCmd(c,s.commandes.length-i,false));
+  }
+
+  if(document.getElementById('vue-consolidation').style.display!=='none') updateConsolidation(s);
+}
+
+function ajouterLigneCmd(c, idx, animate) {
+  document.getElementById('empty-cmd').style.display='none';
+  document.getElementById('cmd-table').style.display='table';
+  const tbody=document.getElementById('cmd-body');
+  const realIdx=idx-1;
+
+  const lignesHtml=c.lignes.map(l=>{
+    const odooTag=l.odooId?`<span class="badge badge-odoo" style="margin-left:3px">#${l.odooId}</span>`:'';
+    const modifTag=l.modifie?'<span style="color:#ff9800;font-size:.65rem;margin-left:3px">max</span>':'';
+    return `<span class="badge badge-lettre">${l.lettre}</span> ×${l.qte}${modifTag}${odooTag}`;
+  }).join(' &nbsp;');
+
+  const tags=[
+    c.manuel?'<span class="badge badge-manuel">manuel</span>':'',
+    c.edite?'<span class="badge badge-edit">édité</span>':''
+  ].filter(Boolean).join(' ');
+
+  const tr=document.createElement('tr');
+  if(animate) tr.className='new-row';
+  if(c.suspect) tr.classList.add('suspect');
+  tr.innerHTML=`
+    <td style="color:#5c3317;font-size:.72rem">${idx}</td>
+    <td style="color:#c9956a">${c.heure}</td>
+    <td>
+      <strong style="font-size:.85rem">${c.nom||''}</strong>${c.nom?'<br>':''}
+      <span style="color:#5c3317;font-size:.72rem">+${c.numero}</span>
+    </td>
+    <td>${lignesHtml} ${tags}</td>
+    <td><span class="badge ${c.source==='privé'?'badge-prive':c.source==='manuel'?'badge-manuel':'badge-groupe'}">${c.source||'—'}</span></td>
+    <td style="white-space:nowrap;">
+      <button onclick="toggleSuspect(${realIdx})" title="${c.suspect?'Retirer flag':'Marquer suspect'}"
+        style="background:none;border:none;cursor:pointer;font-size:1rem;">${c.suspect?'✅':'⚠️'}</button>
+      <button onclick="supprimerCommande(${realIdx})" title="Supprimer"
+        style="background:none;border:none;cursor:pointer;font-size:1rem;color:#f44336;">🗑️</button>
+    </td>`;
+  if(animate) tbody.insertBefore(tr,tbody.firstChild);
+  else tbody.appendChild(tr);
+}
+
+// ── ACTIONS COMMANDES ─────────────────────────────────────────
+function supprimerCommande(idx) {
+  if(!confirm('Supprimer cette commande ? Le stock sera remis à jour.')) return;
+  authFetch('/api/commande/'+idx,{method:'DELETE'}).then(r=>r.json())
+    .then(d=>{ if(d.ok) authFetch('/api/etat').then(r=>r.json()).then(updateUI); });
+}
+
+function toggleSuspect(idx) {
+  authFetch('/api/commande/'+idx+'/suspect',{method:'PATCH'}).then(r=>r.json())
+    .then(()=>authFetch('/api/etat').then(r=>r.json()).then(updateUI));
+}
+
+// ── AJOUT MANUEL ──────────────────────────────────────────────
+function ouvrirAjoutManuel() {
+  document.getElementById('modal-manuel').style.display='flex';
+  document.getElementById('manuel-lignes').innerHTML='';
+  document.getElementById('manuel-numero').value='';
+  document.getElementById('manuel-nom').value='';
+  document.getElementById('manuel-odoo-id').value='';
+  document.getElementById('manuel-recherche').value='';
+  document.getElementById('manuel-client-results').style.display='none';
+  ajouterLigneManuelle();
+}
+
+function rechercherClientOdoo() {
+  const q = document.getElementById('manuel-recherche').value.trim();
+  if(q.length < 2) return;
+  const results = document.getElementById('manuel-client-results');
+  results.style.display='block';
+  results.innerHTML='<div style="padding:6px 10px;color:#c9956a;font-size:.78rem;">⏳...</div>';
+
+  authFetch('/api/odoo/clients?q='+encodeURIComponent(q)).then(r=>r.json()).then(clients=>{
+    if(clients.length===0){
+      results.innerHTML='<div style="padding:6px 10px;color:#5c3317;font-size:.78rem;">Aucun client trouvé</div>';
+      return;
+    }
+    results.innerHTML=clients.map(c=>{
+      const tel=(c.mobile||c.phone||'').replace(/\D/g,'').replace(/^0/,'32');
+      return `<div onclick="selectionnerClientManuel(${c.id},'${c.name.replace(/'/g,"\\'")}','${tel}')"
+        style="padding:6px 10px;cursor:pointer;border-bottom:1px solid #2d1a0a;font-size:.82rem;"
+        onmouseover="this.style.background='#2d1a0a'" onmouseout="this.style.background='none'">
+        <strong>${c.name}</strong>
+        <span style="color:#5c3317;font-size:.72rem;margin-left:6px">${c.mobile||c.phone||''}</span>
+      </div>`;
+    }).join('');
+  });
+}
+
+function selectionnerClientManuel(odooId, nom, tel) {
+  document.getElementById('manuel-nom').value=nom;
+  document.getElementById('manuel-numero').value=tel;
+  document.getElementById('manuel-odoo-id').value=odooId;
+  document.getElementById('manuel-client-results').style.display='none';
+  document.getElementById('manuel-recherche').value=nom;
+}
+
+function fermerModal() { document.getElementById('modal-manuel').style.display='none'; }
+
+function ajouterLigneManuelle() {
+  const container=document.getElementById('manuel-lignes');
+  const vinsDispos=state&&state.vins?state.vins:[];
+  const div=document.createElement('div');
+  div.style.cssText='display:grid;grid-template-columns:1fr 1fr auto;gap:6px;margin-bottom:6px;';
+  div.innerHTML=`
+    <select style="background:#1a0a00;border:1px solid #5c3317;border-radius:6px;padding:6px;color:#f5e6d0;">
+      ${vinsDispos.map(v=>`<option value="${v.lettre}">${v.lettre} — ${v.nom.slice(0,20)}</option>`).join('')}
+    </select>
+    <input type="number" placeholder="Qté" min="1" style="background:#1a0a00;border:1px solid #5c3317;border-radius:6px;padding:6px;color:#f5e6d0;">
+    <button onclick="this.parentElement.remove()" style="background:none;border:none;color:#f44336;cursor:pointer;font-size:1rem;">✕</button>`;
+  container.appendChild(div);
+}
+
+function soumettreManuel() {
+  const numero=document.getElementById('manuel-numero').value.trim();
+  const nom=document.getElementById('manuel-nom').value.trim();
+  const odooId=document.getElementById('manuel-odoo-id').value.trim();
+  if(!numero) return alert('Numéro requis !');
+  const lignes=[];
+  document.getElementById('manuel-lignes').querySelectorAll('div').forEach(row=>{
+    const sel=row.querySelector('select');
+    const inp=row.querySelector('input');
+    if(sel&&inp&&inp.value) lignes.push({lettre:sel.value,qte:parseInt(inp.value)});
+  });
+  if(lignes.length===0) return alert('Ajoute au moins une ligne !');
+  authFetch('/api/commande-manuelle',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({numero,nom,lignes,odoo_client_id:odooId?parseInt(odooId):null})})
+    .then(r=>r.json()).then(d=>{ if(d.ok) fermerModal(); else alert('Erreur : '+(d.error||'inconnue')); });
+}
+
+// ── ONGLETS ───────────────────────────────────────────────────
+function switchTab(tab) {
+  const isCmd=tab==='commandes';
+  document.getElementById('vue-commandes').style.display=isCmd?'block':'none';
+  document.getElementById('vue-consolidation').style.display=isCmd?'none':'block';
+  const tabStyle=(active)=>active
+    ?'flex:1;padding:8px;border-radius:8px;border:none;cursor:pointer;font-size:.85rem;font-weight:600;background:#f5c842;color:#1a0a00;'
+    :'flex:1;padding:8px;border-radius:8px;border:1px solid #5c3317;cursor:pointer;font-size:.85rem;font-weight:600;background:#2d1a0a;color:#c9956a;';
+  document.getElementById('tab-commandes').style.cssText=tabStyle(isCmd);
+  document.getElementById('tab-consolidation').style.cssText=tabStyle(!isCmd);
+  if(!isCmd&&state) updateConsolidation(state);
+}
+
+// ── CONSOLIDATION ─────────────────────────────────────────────
+function updateConsolidation(s) {
+  const map={};
+  for(const cmd of (s.commandes||[])){
+    for(const ligne of cmd.lignes){
+      const key=cmd.numero+'|'+ligne.lettre;
+      if(!map[key]){
+        const vin=(s.vins||[]).find(v=>v.lettre===ligne.lettre);
+        map[key]={nom:cmd.nom||'',numero:cmd.numero,lettre:ligne.lettre,vinNom:vin?vin.nom:'',qteTotal:0,odooId:ligne.odooId||''};
+      }
+      map[key].qteTotal+=ligne.qte;
+    }
+  }
+  const lignes=Object.values(map).sort((a,b)=>{
+    const n=(a.nom||a.numero).localeCompare(b.nom||b.numero);
+    return n!==0?n:a.lettre.localeCompare(b.lettre);
+  });
+  const nbClients=new Set(lignes.map(l=>l.numero)).size;
+  document.getElementById('consol-count').textContent=nbClients+' client'+(nbClients>1?'s':'');
+  if(lignes.length===0){
+    document.getElementById('empty-consol').style.display='block';
+    document.getElementById('consol-table').style.display='none';
+    return;
+  }
+  document.getElementById('empty-consol').style.display='none';
+  document.getElementById('consol-table').style.display='table';
+  const tbody=document.getElementById('consol-body');
+  tbody.innerHTML='';
+  let dernierNumero=null;
+  lignes.forEach(l=>{
+    const isNew=l.numero!==dernierNumero;
+    if(isNew) dernierNumero=l.numero;
+    const tr=document.createElement('tr');
+    if(isNew) tr.style.borderTop='2px solid #5c3317';
+    tr.innerHTML=`
+      <td>${isNew?`<strong style="font-size:.85rem">${l.nom||''}</strong>${l.nom?'<br>':''}<span style="color:#5c3317;font-size:.72rem">+${l.numero}</span>`:''}</td>
+      <td><span class="badge badge-lettre">${l.lettre}</span></td>
+      <td style="font-size:.82rem;color:#c9956a">${l.vinNom}</td>
+      <td><strong>${l.qteTotal}</strong></td>
+      <td>${l.odooId?`<span class="badge badge-odoo">#${l.odooId}</span>`:'<span style="color:#3d2010">—</span>'}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+// ── LANCEMENT VENTE ───────────────────────────────────────────
+function lancerVente() {
+  if(vins.length===0) return alert('Ajoute au moins un vin !');
+  if(state&&state.venteActive){
+    if(!confirm('⚠️ Une vente est déjà en cours !\nRelancer quand même ?')) return;
+  } else {
+    if(!confirm('⚡ Envoyer le message de vente sur WhatsApp maintenant ?')) return;
+  }
+  envoyerVente();
+}
+
+function envoyerVente() {
+  const texteLibre=document.getElementById('texte-libre').value.trim();
+  const btn=document.getElementById('btn-start');
+  btn.disabled=true; btn.textContent='⏳ Envoi en cours...';
+  authFetch('/api/nouvelle-vente',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({texteLibre,vins})})
+    .then(r=>r.json()).then(d=>{
+      btn.disabled=false; btn.textContent='⚡ Lancer la vente maintenant';
+      if(d.warning){const w=document.getElementById('warn-msg');w.textContent='⚠️ '+d.warning;w.style.display='block';setTimeout(()=>w.style.display='none',5000);}
+      document.getElementById('cmd-body').innerHTML='';
+      document.getElementById('empty-cmd').style.display='block';
+      document.getElementById('cmd-table').style.display='none';
+    });
+}
+
+// ── PROGRAMMATION ─────────────────────────────────────────────
+function programmerVente() {
+  if(vins.length===0) return alert('Ajoute au moins un vin avant de programmer !');
+  const heure=document.getElementById('heure-programmee').value;
+  if(!heure) return alert('Choisis une heure !');
+  const maintenant=new Date();
+  const [h,m]=heure.split(':').map(Number);
+  const cible=new Date(); cible.setHours(h,m,0,0);
+  if(cible<=maintenant) cible.setDate(cible.getDate()+1);
+  const delaiMs=cible-maintenant;
+  const delaiMin=Math.round(delaiMs/60000);
+  if(!confirm('⏰ Programmer la vente à '+heure+' ?\n(dans '+(delaiMin<60?delaiMin+' min':Math.floor(delaiMin/60)+'h'+delaiMin%60+'min')+')')) return;
+  if(timerProgrammation) clearTimeout(timerProgrammation);
+  timerProgrammation=setTimeout(()=>{ envoyerVente(); timerProgrammation=null; document.getElementById('prog-status').style.display='none'; document.getElementById('btn-annuler-prog').style.display='none'; },delaiMs);
+  const status=document.getElementById('prog-status');
+  status.style.display='block'; document.getElementById('btn-annuler-prog').style.display='block';
+  const interval=setInterval(()=>{
+    if(!timerProgrammation){clearInterval(interval);return;}
+    const r=cible-new Date(); if(r<=0){clearInterval(interval);return;}
+    status.textContent='⏰ Vente à '+heure+' — dans '+Math.floor(r/60000)+'min '+Math.floor((r%60000)/1000)+'s';
+  },1000);
+}
+
+function annulerProgrammation() {
+  if(timerProgrammation){clearTimeout(timerProgrammation);timerProgrammation=null;}
+  document.getElementById('prog-status').style.display='none';
+  document.getElementById('btn-annuler-prog').style.display='none';
+  document.getElementById('heure-programmee').value='';
+}
+
+function stopperVente() { if(confirm('Stopper la vente ?')) authFetch('/api/stopper',{method:'POST'}); }
+function envoyerStocks() {
+  if(!confirm('Envoyer l\'état des stocks dans le groupe ?')) return;
+  authFetch('/api/envoyer-stocks',{method:'POST'}).then(r=>r.json()).then(d=>{ if(!d.ok) alert('Erreur'); });
+}
+function exporterCSV() { window.open('/api/export?token='+authToken,'_blank'); }
+
+// ── ODOO ─────────────────────────────────────────────────────
+function syncClientsOdoo() {
+  const status = document.getElementById('sync-status');
+  status.style.display = 'block';
+  status.textContent = '⏳ Synchronisation en cours...';
+  authFetch('/api/odoo/sync-clients', {method:'POST'}).then(r=>r.json()).then(d=>{
+    if(d.ok) status.textContent = '✅ ' + d.count + ' clients synchronisés';
+    else status.textContent = '⚠️ Erreur synchronisation';
+    setTimeout(()=>status.style.display='none', 4000);
+  });
+}
+
+function rechercherProduitOdoo(idx) {
+  const query = vins[idx].nom || '';
+  const resultsDiv = document.getElementById('odoo-results-'+idx);
+  resultsDiv.style.display = 'block';
+  resultsDiv.innerHTML = '<div style="padding:8px;color:#c9956a;font-size:.78rem;">⏳ Recherche...</div>';
+
+  authFetch('/api/odoo/produits?q='+encodeURIComponent(query)).then(r=>r.json()).then(produits=>{
+    if(produits.length===0){
+      resultsDiv.innerHTML='<div style="padding:8px;color:#5c3317;font-size:.78rem;">Aucun produit trouvé</div>';
+      return;
+    }
+    resultsDiv.innerHTML = produits.map(p=>`
+      <div onclick="selectionnerProduit(${idx},${p.id},'${p.name.replace(/'/g,"\\'")}',${p.list_price})"
+        style="padding:8px 10px;cursor:pointer;border-bottom:1px solid #2d1a0a;font-size:.82rem;"
+        onmouseover="this.style.background='#2d1a0a'" onmouseout="this.style.background='none'">
+        <strong>#${p.id}</strong> — ${p.name}
+        <span style="color:#c9956a;float:right">${p.list_price}€</span>
+      </div>`).join('');
+  });
+}
+
+function selectionnerProduit(idx, odooId, nom, prix) {
+  vins[idx].odooId = String(odooId);
+  vins[idx].nom = vins[idx].nom || nom;
+  vins[idx].prix = vins[idx].prix || String(prix);
+  document.getElementById('odoo-results-'+idx).style.display='none';
+  renderVins();
+}
+
+async function creerSalesOrders() {
+  if(!confirm('Créer les Sales Orders dans Odoo pour tous les clients ?\n\nCette action est irréversible.')) return;
+
+  const btn = event.target;
+  btn.disabled=true; btn.textContent='⏳ Création en cours...';
+
+  authFetch('/api/odoo/creer-orders',{method:'POST'}).then(r=>r.json()).then(d=>{
+    btn.disabled=false; btn.textContent='🔗 Créer SO Odoo';
+    if(!d.ok){ alert('Erreur : '+(d.error||'inconnue')); return; }
+
+    const ok = d.resultats.filter(r=>r.status==='ok');
+    const erreurs = d.resultats.filter(r=>r.status==='erreur');
+
+    let msg = '✅ '+ok.length+' Sales Order(s) créé(s) avec succès';
+    if(erreurs.length>0) msg += '\n\n⚠️ '+erreurs.length+' erreur(s) :\n'+erreurs.map(e=>e.nom+' : '+e.message).join('\n');
+    alert(msg);
+  });
+}
+</script>
+</body>
+</html>

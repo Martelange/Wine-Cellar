@@ -1,0 +1,10 @@
+# Ne jamais publier sur GitHub
+.env
+sticker_soldout.webp
+vente_en_cours.json
+clients_odoo.json
+
+# Dossiers générés automatiquement
+node_modules/
+.wwebjs_auth/
+.wwebjs_cache/

@@ -1,0 +1,17 @@
+{
+  "name": "wine-cellar-bot",
+  "version": "1.0.0",
+  "description": "Bot WhatsApp ventes flash – Wine Cellar",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^4.18.0",
+    "qrcode-terminal": "^0.12.0",
+    "socket.io": "^4.7.0",
+    "whatsapp-web.js": "^1.23.0",
+    "xmlrpc": "^1.3.2"
+  }
+}
