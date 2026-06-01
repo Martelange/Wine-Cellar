@@ -33,11 +33,8 @@ const TAGS_TYPE = { rouge: 'ROUGE', blanc: 'BLANC', rose: 'ROSE', orange: 'ORANG
 // ---------- ODOO API — xmlrpc npm ----------
 const xmlrpc = require('xmlrpc');
 
-console.log('ENV CHECK - GROUPE_ID:', process.env.GROUPE_ID ? 'OK' : 'MANQUANT');
-console.log('ENV CHECK - PORT:', process.env.PORT);
-console.log('ENV CHECK - ODOO_DB:', process.env.ODOO_DB);
-
 let odooUid = null;
+let odooDbCourant = null;
 
 function createOdooClient(path) {
   const urlParsed = new URL(ODOO_URL);
@@ -61,6 +58,11 @@ function xmlrpcMethodCall(client, method, params) {
 }
 
 async function odooAuthenticate() {
+  // ✅ Réinitialiser si la DB a changé depuis le dernier appel
+  if (odooDbCourant !== ODOO_DB) {
+    odooUid = null;
+    odooDbCourant = ODOO_DB;
+  }
   if (odooUid) return odooUid;
   const client = createOdooClient('/xmlrpc/2/common');
   const login = process.env.ODOO_LOGIN || 'admin';
