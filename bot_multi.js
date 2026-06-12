@@ -788,11 +788,42 @@ setInterval(() => {
 // ---------- WHATSAPP ----------
 let whatsappClient;
 
+// Supprime les fichiers verrous laisses par un arret brutal de Chromium.
+// Necessaire avec le volume Railway persistant : sans ce nettoyage,
+// Chromium refuse de demarrer ("browser is already running").
+function nettoyerVerrousChromium(dossier = './.wwebjs_auth') {
+  const FICHIERS_VERROUS = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+  if (!fs.existsSync(dossier)) return;
+
+  let entrees;
+  try {
+    entrees = fs.readdirSync(dossier, { withFileTypes: true });
+  } catch (e) {
+    console.log('Nettoyage verrous : impossible de lire ' + dossier + ' (' + e.message + ')');
+    return;
+  }
+
+  for (const entree of entrees) {
+    const chemin = path.join(dossier, entree.name);
+    if (FICHIERS_VERROUS.includes(entree.name)) {
+      try {
+        // rmSync + force gere aussi les liens symboliques casses
+        fs.rmSync(chemin, { force: true });
+        console.log('Verrou Chromium supprime : ' + chemin);
+      } catch (e) {
+        console.log('Echec suppression ' + chemin + ' : ' + e.message);
+      }
+    } else if (entree.isDirectory()) {
+      nettoyerVerrousChromium(chemin);
+    }
+  }
+}
+
 function demarrerWhatsApp() {
   if (!GROUPE_ID) console.log('GROUPE_ID non defini dans le .env !');
 
   whatsappClient = new Client({
-    authStrategy: new LocalAuth(),
+    authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
     puppeteer: {
       headless: true,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
@@ -931,6 +962,7 @@ function demarrerWhatsApp() {
     io.emit('whatsapp_disconnected');
   });
 
+  nettoyerVerrousChromium();
   whatsappClient.initialize();
 }
 
