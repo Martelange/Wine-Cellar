@@ -623,7 +623,11 @@ app.post('/api/nouvelle-vente', requireAuth, async (req, res) => {
     console.log('\nVente demarree : ' + vinsAvecLettres.length + ' vins');
     res.json({ ok: true });
   } catch (e) {
-    console.log('Erreur envoi :', e.message);
+    console.log('===== DETAIL ERREUR ENVOI =====');
+    console.log('message :', e && e.message);
+    console.log('name    :', e && e.name);
+    console.log('stack   :', e && e.stack);
+    console.log('===============================');
     res.json({ ok: true, warning: 'Vente demarree mais message non envoye' });
   }
 });
