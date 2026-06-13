@@ -201,6 +201,8 @@
         <div class="card-title">Paramétrage de la vente</div>
         <label>Texte libre (introduction)</label>
         <textarea id="texte-libre" placeholder="Voici notre sélection du moment..." rows="3"></textarea>
+        <label style="margin-top:10px;display:block;">Texte de fin (instructions de commande)</label>
+        <textarea id="texte-fin" rows="8"></textarea>
         <div style="margin-top:14px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;">
           <span style="font-size:0.75rem;text-transform:uppercase;letter-spacing:2px;color:#c9956a;">Vins en vente</span>
           <span style="font-size:0.72rem;color:#5c3317;" id="vins-count"></span>
@@ -287,7 +289,8 @@
 const CONTENANTS = [
   {v:'bouteille', l:'Bouteille (75cl)'},
   {v:'magnum',    l:'Magnum (1.5L)'},
-  {v:'jeroboam', l:'Jéroboam (3L)'}
+  {v:'jeroboam', l:'Jéroboam (3L)'},
+  {v:'unite',     l:'Unité (pièce)'}
 ];
 const TYPES_VIN = [
   {v:'',          l:'— Type de vin —'},
@@ -297,6 +300,21 @@ const TYPES_VIN = [
   {v:'orange',    l:'🟠 Orange'},
   {v:'petillant', l:'🫧 Pétillant'}
 ];
+
+// Texte de fin par défaut du message d'annonce (doit rester identique à TEXTE_FIN_DEFAUT dans bot_multi.js)
+const TEXTE_FIN_DEFAUT =
+`📝 *Comment commander ?*
+   *Quantite + Lettre* pour chaque vin souhaite
+   Ex: *3A* — *6B* — *2A 3B* — *6A 3B 2C*
+
+👍 All good — commande validee telle quelle
+👇 Commande modifiee (regles ou fin de stock)
+❌ Commande refusee
+📧 Facture envoyee par mail ulterieurement`;
+// Pré-remplissage via la propriété .value (et non innerHTML / attribut HTML) :
+// aucune injection possible, conforme à la règle D8/P4. Si ce texte devait un jour
+// être affiché ailleurs via innerHTML, le passer par esc().
+document.getElementById('texte-fin').value = TEXTE_FIN_DEFAUT;
 
 // ── AUTH ──────────────────────────────────────────────────────
 let authToken = sessionStorage.getItem('wc_token');
@@ -840,9 +858,10 @@ function lancerVente() {
 
 function envoyerVente() {
   const texteLibre=document.getElementById('texte-libre').value.trim();
+  const texteFin=document.getElementById('texte-fin').value.trim();
   const btn=document.getElementById('btn-start');
   btn.disabled=true; btn.textContent='⏳ Envoi en cours...';
-  authFetch('/api/nouvelle-vente',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({texteLibre,vins})})
+  authFetch('/api/nouvelle-vente',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({texteLibre,texteFin,vins})})
     .then(r=>r.json()).then(d=>{
       btn.disabled=false; btn.textContent='⚡ Lancer la vente maintenant';
       if(d.warning){const w=document.getElementById('warn-msg');w.textContent='⚠️ '+d.warning;w.style.display='block';setTimeout(()=>w.style.display='none',5000);}
@@ -866,9 +885,10 @@ function programmerVente() {
   if(!confirm('⏰ Programmer la vente à '+heure+' ?\n(dans '+(delaiMin<60?delaiMin+' min':Math.floor(delaiMin/60)+'h'+delaiMin%60+'min')+')')) return;
 
   const texteLibre=document.getElementById('texte-libre').value.trim();
+  const texteFin=document.getElementById('texte-fin').value.trim();
   authFetch('/api/programmer-vente',{
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ heureISO: cible.toISOString(), texteLibre, vins })
+    body: JSON.stringify({ heureISO: cible.toISOString(), texteLibre, texteFin, vins })
   }).then(r=>r.json()).then(d=>{
     if(d.ok) afficherStatutProgrammation(cible.toISOString());
     else alert('Erreur : '+(d.error||'inconnue'));

@@ -29,6 +29,27 @@ const DELAI_MERCI = 20000;
 
 const TAGS_TYPE = { rouge: 'ROUGE', blanc: 'BLANC', rose: 'ROSE', orange: 'ORANGE', petillant: 'PETILLANT' };
 
+// Wording par contenant (annonce, stocks, sold out par reference)
+// abr = abreviation prix, stockPlur = mot du stock, qteSing/qtePlur = mots des min/max,
+// restant/vendu = adjectifs du message stocks
+const CONTENANTS_TXT = {
+  bouteille: { abr: 'btl.', stockPlur: 'bouteilles', qteSing: 'bouteille', qtePlur: 'bouteilles', restant: 'restants', vendu: 'vendus', tous: 'Toutes les' },
+  magnum:    { abr: 'mag.', stockPlur: 'magnums',    qteSing: 'magnum',    qtePlur: 'magnums',    restant: 'restants', vendu: 'vendus', tous: 'Tous les' },
+  jeroboam:  { abr: 'jer.', stockPlur: 'jeroboams',  qteSing: 'jeroboam',  qtePlur: 'jeroboams',  restant: 'restants', vendu: 'vendus', tous: 'Tous les' },
+  unite:     { abr: 'pce',  stockPlur: 'unit\u00e9s', qteSing: 'pi\u00e8ce', qtePlur: 'pi\u00e8ces', restant: 'restantes', vendu: 'vendues', tous: 'Toutes les' }
+};
+function motsContenant(contenant) { return CONTENANTS_TXT[contenant] || CONTENANTS_TXT.bouteille; }
+
+// Texte de fin par defaut du message d'annonce (personnalisable depuis le dashboard)
+const TEXTE_FIN_DEFAUT =
+  '\ud83d\udcdd *Comment commander ?*\n' +
+  '   *Quantite + Lettre* pour chaque vin souhaite\n' +
+  '   Ex: *3A* \u2014 *6B* \u2014 *2A 3B* \u2014 *6A 3B 2C*\n\n' +
+  '\ud83d\udc4d All good \u2014 commande validee telle quelle\n' +
+  '\ud83d\udc47 Commande modifiee (regles ou fin de stock)\n' +
+  '\u274c Commande refusee\n' +
+  '\ud83d\udce7 Facture envoyee par mail ulterieurement';
+
 // ---------- ODOO API ----------
 const xmlrpc = require('xmlrpc');
 
@@ -154,7 +175,7 @@ let clientsOdoo = chargerClients();
 // ---------- ETAT ----------
 function etatInitial() {
   return {
-    texteLibre: '', vins: [], commandes: [], commandes_attente: [], venteActive: false,
+    texteLibre: '', texteFin: TEXTE_FIN_DEFAUT, vins: [], commandes: [], commandes_attente: [], venteActive: false,
     dateVente: new Date().toISOString(), heureDebut: null,
     seuil50envoye: false, seuil20envoye: false, historique_edits: []
   };
@@ -257,49 +278,40 @@ function reagirAvecDelai(msg, emoji) {
 
 // ---------- MESSAGES WHATSAPP ----------
 function construireMessageVente() {
-  const CONT_SING = { bouteille: 'bouteille', magnum: 'magnum', jeroboam: 'jeroboam' };
-  const CONT_PLUR = { bouteille: 'bouteilles', magnum: 'magnums', jeroboam: 'jeroboams' };
-  const CONT_ABR  = { bouteille: 'btl.', magnum: 'mag.', jeroboam: 'jer.' };
   let msg = '';
   if (state.texteLibre) msg += state.texteLibre + '\n\n';
   msg += '\u2500'.repeat(30) + '\n';
   state.vins.forEach(vin => {
-    const abrv = CONT_ABR[vin.contenant] || 'btl.';
-    const plur = CONT_PLUR[vin.contenant] || 'bouteilles';
-    const sing = CONT_SING[vin.contenant] || 'bouteille';
+    const mots = motsContenant(vin.contenant);
     const typeTag = vin.type ? (TAGS_TYPE[vin.type] || '') + ' - ' : '';
-    msg += '\n*' + vin.lettre + '.* ' + typeTag + vin.nom + ' \u2014 ' + vin.prix + '\u20ac/' + abrv + '\n';
-    msg += '   \ud83d\udce6 ' + vin.stock + ' ' + plur + ' disponibles\n';
-    if (vin.max) msg += '   \u2b06\ufe0f Maximum ' + vin.max + ' ' + (vin.max > 1 ? plur : sing) + ' par personne\n';
-    if (vin.min && vin.min > 1) msg += '   \u2b07\ufe0f Minimum ' + vin.min + ' ' + (vin.min > 1 ? plur : sing) + ' par commande\n';
+    msg += '\n*' + vin.lettre + '.* ' + typeTag + vin.nom + ' \u2014 ' + vin.prix + '\u20ac/' + mots.abr + '\n';
+    msg += '   \ud83d\udce6 ' + vin.stock + ' ' + mots.stockPlur + ' disponibles\n';
+    if (vin.max) msg += '   \u2b06\ufe0f Maximum ' + vin.max + ' ' + (vin.max > 1 ? mots.qtePlur : mots.qteSing) + ' par personne\n';
+    if (vin.min && vin.min > 1) msg += '   \u2b07\ufe0f Minimum ' + vin.min + ' ' + (vin.min > 1 ? mots.qtePlur : mots.qteSing) + ' par commande\n';
   });
   msg += '\n' + '\u2500'.repeat(30) + '\n';
-  msg += '\n\ud83d\udcdd *Comment commander ?*\n';
-  msg += '   *Quantite + Lettre* pour chaque vin souhaite\n';
-  msg += '   Ex: *3A* \u2014 *6B* \u2014 *2A 3B* \u2014 *6A 3B 2C*\n\n';
-  msg += '\ud83d\udc4d All good \u2014 commande validee telle quelle\n';
-  msg += '\ud83d\udc47 Commande modifiee (regles ou fin de stock)\n';
-  msg += '\u274c Commande refusee\n';
-  msg += '\ud83d\udce7 Facture envoyee par mail ulterieurement';
+  // Texte de fin : champ personnalisable depuis le dashboard.
+  // Fallback sur le texte par defaut si absent (anciennes ventes sauvegardees avant cette version).
+  const texteFin = (typeof state.texteFin === 'string') ? state.texteFin : TEXTE_FIN_DEFAUT;
+  if (texteFin.trim()) msg += '\n' + texteFin;
   return msg;
 }
 
 function construireMessageStocks() {
-  const CONT_PLUR = { bouteille: 'bouteilles', magnum: 'magnums', jeroboam: 'jeroboams' };
   const duree = state.heureDebut ? formatDuree(Date.now() - state.heureDebut) : '?';
   let msg = '\ud83d\udcca *Etat des stocks* \u2014 ' + duree + ' apres le lancement\n';
   msg += '\u2500'.repeat(30) + '\n\n';
   state.vins.forEach(vin => {
-    const plur = CONT_PLUR[vin.contenant] || 'bouteilles';
+    const mots = motsContenant(vin.contenant);
     const pct = vin.stock > 0 ? Math.round((vin.stockRestant / vin.stock) * 100) : 0;
     const vendues = vin.stock - vin.stockRestant;
     const emoji = pct <= 20 ? '\ud83d\udd34' : pct <= 50 ? '\ud83d\udfe1' : '\ud83d\udfe2';
     if (vin.stockRestant === 0) {
       msg += emoji + ' *' + vin.lettre + '.* ' + vin.nom + '\n';
-      msg += '   \ud83d\udd34 SOLD OUT (' + vendues + ' ' + plur + ' vendus)\n\n';
+      msg += '   \ud83d\udd34 SOLD OUT (' + vendues + ' ' + mots.stockPlur + ' ' + mots.vendu + ')\n\n';
     } else {
       msg += emoji + ' *' + vin.lettre + '.* ' + vin.nom + '\n';
-      msg += '   ' + vin.stockRestant + ' ' + plur + ' restants \u2014 *' + pct + '%* disponible\n\n';
+      msg += '   ' + vin.stockRestant + ' ' + mots.stockPlur + ' ' + mots.restant + ' \u2014 *' + pct + '%* disponible\n\n';
     }
   });
   const totalRestant = stockTotalRestant();
@@ -358,14 +370,14 @@ function annulerProgrammationServeur() {
   io.emit('programmation_status', null);
 }
 
-function programmerVenteServeur(heureISO, texteLibre, vins) {
+function programmerVenteServeur(heureISO, texteLibre, texteFin, vins) {
   annulerProgrammationServeur();
   const cible = new Date(heureISO);
   const delaiMs = cible - Date.now();
   if (delaiMs <= 0) return { error: 'Heure déjà passée' };
 
   programmationHeure = heureISO;
-  programmationData = { texteLibre, vins };
+  programmationData = { texteLibre, texteFin, vins };
   io.emit('programmation_status', { heureISO });
 
   timerProgrammation = setTimeout(async () => {
@@ -384,6 +396,7 @@ function programmerVenteServeur(heureISO, texteLibre, vins) {
 
     state = etatInitial();
     state.texteLibre = texteLibre || '';
+    state.texteFin = (typeof texteFin === 'string') ? texteFin : TEXTE_FIN_DEFAUT;
     state.vins = vinsAvecLettres;
     state.venteActive = true;
     state.dateVente = new Date().toISOString();
@@ -467,7 +480,8 @@ async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe) {
   for (const ligne of lignesValidees) {
     const vin = state.vins.find(v => v.lettre === ligne.lettre);
     if (vin && vin.stockRestant === 0) {
-      const msgSoldOut = '\ud83d\udd34 *' + vin.lettre + '. ' + vin.nom + ' \u2014 SOLD OUT !*\n\nToutes les bouteilles ont trouv\u00e9 preneur. Merci ! \ud83c\udf77';
+      const mots = motsContenant(vin.contenant);
+      const msgSoldOut = '\ud83d\udd34 *' + vin.lettre + '. ' + vin.nom + ' \u2014 SOLD OUT !*\n\n' + mots.tous + ' ' + mots.qtePlur + ' ont trouv\u00e9 preneur. Merci ! \ud83c\udf77';
       try { await whatsappClient.sendMessage(GROUPE_ID, msgSoldOut); }
       catch (e) { console.log('Erreur sold out vin :', e.message); }
     }
@@ -586,7 +600,7 @@ app.delete('/api/clients/:numero', requireAuth, (req, res) => {
 });
 
 app.post('/api/nouvelle-vente', requireAuth, async (req, res) => {
-  const { texteLibre, vins } = req.body;
+  const { texteLibre, texteFin, vins } = req.body;
   if (!vins || vins.length === 0) return res.status(400).json({ error: 'Aucun vin defini' });
   const vinsAvecLettres = vins.map((vin, i) => ({
     lettre: String.fromCharCode(65 + i),
@@ -597,6 +611,7 @@ app.post('/api/nouvelle-vente', requireAuth, async (req, res) => {
   }));
   state = etatInitial();
   state.texteLibre = texteLibre || '';
+  state.texteFin = (typeof texteFin === 'string') ? texteFin : TEXTE_FIN_DEFAUT;
   state.vins = vinsAvecLettres;
   state.venteActive = true;
   state.dateVente = new Date().toISOString();
@@ -614,9 +629,9 @@ app.post('/api/nouvelle-vente', requireAuth, async (req, res) => {
 });
 
 app.post('/api/programmer-vente', requireAuth, (req, res) => {
-  const { heureISO, texteLibre, vins } = req.body;
+  const { heureISO, texteLibre, texteFin, vins } = req.body;
   if (!heureISO || !vins || vins.length === 0) return res.status(400).json({ error: 'Invalide' });
-  const result = programmerVenteServeur(heureISO, texteLibre, vins);
+  const result = programmerVenteServeur(heureISO, texteLibre, texteFin, vins);
   if (result.error) return res.status(400).json(result);
   res.json(result);
 });
