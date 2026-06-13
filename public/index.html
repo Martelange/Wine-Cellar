@@ -323,6 +323,17 @@ function authFetch(url, opts={}) {
   return fetch(url,opts);
 }
 
+// Échappe les caractères spéciaux HTML (apostrophes, guillemets, chevrons, &)
+// pour tout texte dynamique injecté dans innerHTML ou un attribut HTML (cf. D8/P4)
+function esc(s) {
+  return String(s==null?'':s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+
 document.getElementById('login-input').addEventListener('keydown',e=>{if(e.key==='Enter')login();});
 if(authToken) afficherDashboard();
 
@@ -347,12 +358,12 @@ function renderVins() {
     div.innerHTML=`
       <div class="vin-card-header">
         <div class="vin-lettre">${lettre}</div>
-        <span class="vin-card-title">${vin.nom||'Nouveau vin'}</span>
+        <span class="vin-card-title">${esc(vin.nom)||'Nouveau vin'}</span>
         <button class="remove-vin" onclick="supprimerVin(${i})">✕</button>
       </div>
       <div>
         <label>Nom / description *</label>
-        <input type="text" value="${vin.nom||''}" placeholder="Pfalz Chardonnay 2025"
+        <input type="text" value="${esc(vin.nom||'')}" placeholder="Pfalz Chardonnay 2025"
           oninput="vins[${i}].nom=this.value;document.querySelectorAll('.vin-card-title')[${i}].textContent=this.value||'Nouveau vin'">
       </div>
       <div class="vin-grid">
@@ -494,7 +505,7 @@ function updateUI(s) {
       div.innerHTML=`
         <div class="stock-vin-header">
           <div class="stock-vin-lettre">${vin.lettre}</div>
-          <div class="stock-vin-nom">${vin.nom}</div>
+          <div class="stock-vin-nom">${esc(vin.nom)}</div>
           ${vin.stockRestant===0?'<span class="sold-out-tag">SOLD OUT</span>':''}
           <div class="stock-vin-nb">${vin.stockRestant}<span style="font-size:.75rem;color:#c9956a;font-weight:400">/${vin.stock}</span></div>
         </div>
@@ -550,7 +561,7 @@ function ajouterLigneCmd(c, idx, animate) {
     <td style="color:#5c3317;font-size:.72rem">${idx}</td>
     <td style="color:#c9956a">${c.heure}</td>
     <td>
-      <strong style="font-size:.85rem">${c.nom||''}</strong>${c.nom?'<br>':''}
+      <strong style="font-size:.85rem">${esc(c.nom||'')}</strong>${c.nom?'<br>':''}
       <span style="color:#5c3317;font-size:.72rem">+${c.numero}</span>
     </td>
     <td>${lignesHtml} ${tags}</td>
@@ -603,15 +614,27 @@ function rechercherClientOdoo() {
       results.innerHTML='<div style="padding:6px 10px;color:#5c3317;font-size:.78rem;">Aucun client trouvé</div>';
       return;
     }
-    results.innerHTML=clients.map(c=>{
+    // Pattern D8 : éléments créés en JS + textContent + onclick en closure (cf. P4).
+    results.innerHTML = '';
+    clients.forEach(c=>{
       const tel=(c.mobile||c.phone||'').replace(/\D/g,'').replace(/^0/,'32');
-      return `<div onclick="selectionnerClientManuel(${c.id},'${c.name.replace(/'/g,"\\'")}','${tel}')"
-        style="padding:6px 10px;cursor:pointer;border-bottom:1px solid #2d1a0a;font-size:.82rem;"
-        onmouseover="this.style.background='#2d1a0a'" onmouseout="this.style.background='none'">
-        <strong>${c.name}</strong>
-        <span style="color:#5c3317;font-size:.72rem;margin-left:6px">${c.mobile||c.phone||''}</span>
-      </div>`;
-    }).join('');
+      const div = document.createElement('div');
+      div.style.cssText = 'padding:6px 10px;cursor:pointer;border-bottom:1px solid #2d1a0a;font-size:.82rem;';
+      div.onmouseover = ()=>{ div.style.background='#2d1a0a'; };
+      div.onmouseout = ()=>{ div.style.background='none'; };
+      div.onclick = ()=>selectionnerClientManuel(c.id, c.name, tel);
+
+      const strong = document.createElement('strong');
+      strong.textContent = c.name;
+      div.appendChild(strong);
+
+      const span = document.createElement('span');
+      span.style.cssText = 'color:#5c3317;font-size:.72rem;margin-left:6px';
+      span.textContent = c.mobile||c.phone||'';
+      div.appendChild(span);
+
+      results.appendChild(div);
+    });
   });
 }
 
@@ -632,7 +655,7 @@ function ajouterLigneManuelle() {
   div.style.cssText='display:grid;grid-template-columns:1fr 1fr auto;gap:6px;margin-bottom:6px;';
   div.innerHTML=`
     <select style="background:#1a0a00;border:1px solid #5c3317;border-radius:6px;padding:6px;color:#f5e6d0;">
-      ${vinsDispos.map(v=>`<option value="${v.lettre}">${v.lettre} — ${v.nom.slice(0,20)}</option>`).join('')}
+      ${vinsDispos.map(v=>`<option value="${v.lettre}">${v.lettre} — ${esc(v.nom.slice(0,20))}</option>`).join('')}
     </select>
     <input type="number" placeholder="Qté" min="1" style="background:#1a0a00;border:1px solid #5c3317;border-radius:6px;padding:6px;color:#f5e6d0;">
     <button onclick="this.parentElement.remove()" style="background:none;border:none;color:#f44336;cursor:pointer;font-size:1rem;">✕</button>`;
@@ -675,7 +698,7 @@ function updateAttente(s) {
     tr.style.cssText = 'border-bottom:1px solid #3d1a00;';
     tr.innerHTML = `
       <td style="color:#c9956a">${c.heure}</td>
-      <td><strong style="font-size:.85rem">${c.nom||''}</strong>${c.nom?'<br>':''}<span style="color:#5c3317;font-size:.72rem">+${c.numero}</span></td>
+      <td><strong style="font-size:.85rem">${esc(c.nom||'')}</strong>${c.nom?'<br>':''}<span style="color:#5c3317;font-size:.72rem">+${c.numero}</span></td>
       <td>${lignesHtml}</td>
       <td style="white-space:nowrap;">
         <button onclick="validerAttente(${i})" title="Valider cette commande"
@@ -715,7 +738,7 @@ function ouvrirModifierCommande(idx) {
     div.style.cssText = 'display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;margin-bottom:8px;';
     div.innerHTML = `
       <span class="badge badge-lettre">${l.lettre}</span>
-      <span style="font-size:.82rem;color:#c9956a;">${vin ? vin.nom.slice(0,30) : l.lettre}</span>
+      <span style="font-size:.82rem;color:#c9956a;">${vin ? esc(vin.nom.slice(0,30)) : l.lettre}</span>
       <input type="number" value="${l.qte}" min="0" data-lettre="${l.lettre}"
         style="width:70px;background:#1a0a00;border:1px solid #5c3317;border-radius:6px;padding:5px;color:#f5e6d0;text-align:center;">`;
     container.appendChild(div);
@@ -795,9 +818,9 @@ function updateConsolidation(s) {
     const tr=document.createElement('tr');
     if(isNew) tr.style.borderTop='2px solid #5c3317';
     tr.innerHTML=`
-      <td>${isNew?`<strong style="font-size:.85rem">${l.nom||''}</strong>${l.nom?'<br>':''}<span style="color:#5c3317;font-size:.72rem">+${l.numero}</span>`:''}</td>
+      <td>${isNew?`<strong style="font-size:.85rem">${esc(l.nom||'')}</strong>${l.nom?'<br>':''}<span style="color:#5c3317;font-size:.72rem">+${l.numero}</span>`:''}</td>
       <td><span class="badge badge-lettre">${l.lettre}</span></td>
-      <td style="font-size:.82rem;color:#c9956a">${l.vinNom}</td>
+      <td style="font-size:.82rem;color:#c9956a">${esc(l.vinNom)}</td>
       <td><strong>${l.qteTotal}</strong></td>
       <td>${l.odooId?`<span class="badge badge-odoo">#${l.odooId}</span>`:'<span style="color:#3d2010">—</span>'}</td>`;
     tbody.appendChild(tr);
@@ -908,13 +931,28 @@ function rechercherProduitOdoo(idx) {
       resultsDiv.innerHTML='<div style="padding:8px;color:#5c3317;font-size:.78rem;">Aucun produit trouvé</div>';
       return;
     }
-    resultsDiv.innerHTML = produits.map(p=>`
-      <div onclick="selectionnerProduit(${idx},${p.id},'${p.name.replace(/'/g,"\\'")}',${p.list_price})"
-        style="padding:8px 10px;cursor:pointer;border-bottom:1px solid #2d1a0a;font-size:.82rem;"
-        onmouseover="this.style.background='#2d1a0a'" onmouseout="this.style.background='none'">
-        <strong>#${p.id}</strong> — ${p.name}
-        <span style="color:#c9956a;float:right">${p.list_price}€</span>
-      </div>`).join('');
+    // Pattern D8 : éléments créés en JS + textContent + onclick en closure.
+    // Jamais de nom de produit dans une chaîne HTML (apostrophes, guillemets, chevrons...).
+    resultsDiv.innerHTML = '';
+    produits.forEach(p=>{
+      const div = document.createElement('div');
+      div.style.cssText = 'padding:8px 10px;cursor:pointer;border-bottom:1px solid #2d1a0a;font-size:.82rem;';
+      div.onmouseover = ()=>{ div.style.background='#2d1a0a'; };
+      div.onmouseout = ()=>{ div.style.background='none'; };
+      div.onclick = ()=>selectionnerProduit(idx, p.id, p.name, p.list_price);
+
+      const strong = document.createElement('strong');
+      strong.textContent = '#'+p.id;
+      div.appendChild(strong);
+      div.appendChild(document.createTextNode(' — '+p.name));
+
+      const span = document.createElement('span');
+      span.style.cssText = 'color:#c9956a;float:right';
+      span.textContent = p.list_price+'€';
+      div.appendChild(span);
+
+      resultsDiv.appendChild(div);
+    });
   });
 }
 
