@@ -850,7 +850,7 @@ function demarrerWhatsApp() {
     },
     webVersionCache: {
       type: 'remote',
-      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1023280021-alpha.html'
+      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1039672020-alpha.html'
     }
   });
 
@@ -864,6 +864,12 @@ function demarrerWhatsApp() {
   whatsappClient.on('ready', async () => {
     dernierQrCode = null;
     console.log('\nBot connecte ! Numero :', whatsappClient.info.wid.user);
+    try {
+      const waVersion = await whatsappClient.getWWebVersion();
+      console.log('>>> WA Web version chargee:', waVersion);
+    } catch(e) {
+      console.log('>>> Impossible de lire la version WA Web:', e.message);
+    }
     console.log('Dashboard : http://localhost:' + PORT + '\n');
     io.emit('whatsapp_ready');
     if (ODOO_API_KEY) {
