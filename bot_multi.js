@@ -5,8 +5,8 @@
 
 require('dotenv').config();
 
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage } = require('@whiskeysockets/baileys');
+const pino = require('pino');
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -255,23 +255,23 @@ function parseCommandeMulti(msgBody) {
 }
 
 // ---------- NUMERO REEL ----------
-async function getNumeroReel(msg) {
-  const brut = msg.author || msg.from;
-  if (brut.includes('@lid')) {
-    try {
-      const contact = await msg.getContact();
-      if (contact.id && contact.id.user) return contact.id.user;
-      if (contact.number) return contact.number;
-    } catch (e) { return brut.replace(/@lid/g, ''); }
-  }
-  return brut.replace(/@c\.us|@g\.us/g, '').replace(/\D/g, '');
+// En Baileys, le JID est toujours résolu.
+// Groupe : msg.key.participant = '32477123456@s.whatsapp.net'
+// Privé  : msg.key.remoteJid  = '32477123456@s.whatsapp.net'
+function getNumeroReel(msg) {
+  const jid = msg.key.participant || msg.key.remoteJid || '';
+  return jid.split('@')[0].split(':')[0]; // retire le domaine et le suffixe :0 éventuel
 }
 
 // ---------- REACTIONS ----------
 function reagirAvecDelai(msg, emoji) {
   const delai = Math.floor(Math.random() * 2000) + 1000;
   setTimeout(async () => {
-    try { await msg.react(emoji); }
+    try {
+      await sock.sendMessage(msg.key.remoteJid, {
+        react: { text: emoji, key: msg.key }
+      });
+    }
     catch (e) { console.log('Reaction echouee :', e.message); }
   }, delai);
 }
@@ -333,12 +333,12 @@ async function verifierSeuils() {
   if (!state.seuil50envoye && pct <= 50) {
     state.seuil50envoye = true; sauvegarderEtat();
     const msg = '\ud83d\udfe1 *Mi-parcours !*\n\n*' + vendues + ' bouteilles* vendues en ' + duree + ' !\nIl reste encore *' + restant + ' bouteilles* disponibles.\n\nDepêchez-vous... \u23f0';
-    try { await whatsappClient.sendMessage(GROUPE_ID, msg); } catch (e) { console.log('Erreur 50% :', e.message); }
+    try { await sock.sendMessage(GROUPE_ID, { text: msg }); } catch (e) { console.log('Erreur 50% :', e.message); }
   }
   if (!state.seuil20envoye && pct <= 20) {
     state.seuil20envoye = true; sauvegarderEtat();
     const msg = '\ud83d\udd34 *Plus que ' + restant + ' bouteilles !*\n\nOn a ecoule *' + vendues + ' bouteilles* en ' + duree + '...\nC\'est le moment ou jamais ! \ud83c\udf77';
-    try { await whatsappClient.sendMessage(GROUPE_ID, msg); } catch (e) { console.log('Erreur 20% :', e.message); }
+    try { await sock.sendMessage(GROUPE_ID, { text: msg }); } catch (e) { console.log('Erreur 20% :', e.message); }
   }
 }
 
@@ -349,12 +349,15 @@ async function sequenceSoldOut() {
   const nbCommandes = state.commandes.length;
   console.log('\nSOLD OUT !');
   if (fs.existsSync(STICKER_FILE)) {
-    try { const media = MessageMedia.fromFilePath(STICKER_FILE); await whatsappClient.sendMessage(GROUPE_ID, media, { sendMediaAsSticker: true }); }
-    catch (e) { await whatsappClient.sendMessage(GROUPE_ID, '\ud83d\udd34 *SOLD OUT !*'); }
-  } else { await whatsappClient.sendMessage(GROUPE_ID, '\ud83d\udd34 *SOLD OUT !*'); }
+    try {
+      const stickerBuffer = fs.readFileSync(STICKER_FILE);
+      await sock.sendMessage(GROUPE_ID, { sticker: stickerBuffer });
+    }
+    catch (e) { await sock.sendMessage(GROUPE_ID, { text: '\ud83d\udd34 *SOLD OUT !*' }); }
+  } else { await sock.sendMessage(GROUPE_ID, { text: '\ud83d\udd34 *SOLD OUT !*' }); }
   setTimeout(async () => {
     const fin = '\ud83d\udd25 *SOLD OUT en ' + duree + '* \u26a1\n\n*Un enorme merci a tous* \ud83d\ude4f\nVous avez ete ultra rapides !\n\n\ud83d\udce6 *' + vendues + ' bouteilles* vendues\n\ud83d\udc65 *' + nbCommandes + ' commandes* enregistrees\n\nVous serez contactes prochainement. \ud83c\udf77';
-    try { await whatsappClient.sendMessage(GROUPE_ID, fin); } catch (e) { console.log('Erreur fin :', e.message); }
+    try { await sock.sendMessage(GROUPE_ID, { text: fin }); } catch (e) { console.log('Erreur fin :', e.message); }
   }, DELAI_MERCI);
 }
 
@@ -405,8 +408,7 @@ function programmerVenteServeur(heureISO, texteLibre, texteFin, vins) {
     io.emit('update', state);
 
     try {
-      //await whatsappClient.sendMessage(GROUPE_ID, construireMessageVente());
-      await whatsappClient.sendMessage('32456723677@c.us', 'Test envoi prive');
+      await sock.sendMessage(GROUPE_ID, { text: construireMessageVente() });
       console.log('\nVente programmee lancee : ' + vinsAvecLettres.length + ' vins');
       io.emit('vente_lancee_auto');
     } catch (e) { console.log('Erreur envoi vente programmee :', e.message); }
@@ -421,7 +423,7 @@ async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe) {
   const lignesParsees = parseCommandeMulti(body);
   if (!lignesParsees) return;
 
-  const msgId = (msg.id && msg.id._serialized) ? msg.id._serialized : (numeroContact + '|' + body);
+  const msgId = msg.key?.id || (numeroContact + '|' + body);
   if (estDejaTraite(msgId)) { console.log('Doublon ignore :', msgId.slice(0, 40)); return; }
 
   const lignesValidees = [];
@@ -493,7 +495,8 @@ async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe) {
     heure: new Date().toLocaleTimeString('fr-BE'),
     numero: numeroContact, nom: clientOdoo.nom || nom,
     odoo_client_id: clientOdoo.odoo_id || null,
-    lignes: lignesValidees, source: estDuGroupe ? 'groupe' : 'prive', msgOriginal: body
+    lignes: lignesValidees, source: estDuGroupe ? 'groupe' : 'prive', msgOriginal: body,
+    waMsgId: msg.key?.id || null   // ← ajouter cette ligne pour la détection des édits
   };
   state.commandes.push(commande);
   sauvegarderEtat();
@@ -572,7 +575,7 @@ app.post('/api/odoo/creer-orders', requireAuth, async (req, res) => {
         fs.writeFileSync(CLIENTS_FILE, JSON.stringify(clientsOdoo, null, 2));
         console.log('Nouveau client cree : #' + newPartnerId);
         const msgPrive = 'Bonjour,\n\nMerci beaucoup pour cette premi\u00e8re commande sur Wine Cellar ! \ud83c\udf77\n\nPuis-je vous demander votre adresse mail ?\nAvez-vous besoin d\'une facture ? Si oui, je veux bien les coordonn\u00e9es.\n\nMerci d\'avance\nBon week-end\n\nHugues / Wine Cellar';
-        try { await whatsappClient.sendMessage(numero + '@c.us', msgPrive); } catch (e) { console.log('Erreur msg prive :', e.message); }
+        try { await sock.sendMessage(numero + '@s.whatsapp.net', { text: msgPrive }); } catch (e) { console.log('Erreur msg prive :', e.message); }
       } catch (e) {
         resultats.push({ numero, nom: client.nom, status: 'erreur', message: e.message });
         continue;
@@ -806,190 +809,202 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 // ---------- WHATSAPP ----------
-let whatsappClient;
+let sock = null;
 
-// Supprime les fichiers verrous laisses par un arret brutal de Chromium.
-// Necessaire avec le volume Railway persistant : sans ce nettoyage,
-// Chromium refuse de demarrer ("browser is already running").
-function nettoyerVerrousChromium(dossier = './.wwebjs_auth') {
-  const FICHIERS_VERROUS = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
-  if (!fs.existsSync(dossier)) return;
-
-  let entrees;
-  try {
-    entrees = fs.readdirSync(dossier, { withFileTypes: true });
-  } catch (e) {
-    console.log('Nettoyage verrous : impossible de lire ' + dossier + ' (' + e.message + ')');
-    return;
-  }
-
-  for (const entree of entrees) {
-    const chemin = path.join(dossier, entree.name);
-    if (FICHIERS_VERROUS.includes(entree.name)) {
-      try {
-        // rmSync + force gere aussi les liens symboliques casses
-        fs.rmSync(chemin, { force: true });
-        console.log('Verrou Chromium supprime : ' + chemin);
-      } catch (e) {
-        console.log('Echec suppression ' + chemin + ' : ' + e.message);
-      }
-    } else if (entree.isDirectory()) {
-      nettoyerVerrousChromium(chemin);
-    }
-  }
-}
-
-function demarrerWhatsApp() {
+// ---------- WHATSAPP (Baileys) ----------
+async function demarrerWhatsApp() {
   if (!GROUPE_ID) console.log('GROUPE_ID non defini dans le .env !');
 
-  whatsappClient = new Client({
-    authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
-    puppeteer: {
-      headless: true,
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-    }
+  // Session persistante dans le même dossier que l'ancien volume Railway
+  // (le volume reste monté sur /app/.wwebjs_auth — on le réutilise pour Baileys)
+  const { state: waAuthState, saveCreds } = await useMultiFileAuthState('./.wwebjs_auth');
+
+  sock = makeWASocket({
+    auth: waAuthState,
+    printQRInTerminal: false, // on gère le QR via le dashboard
+    logger: pino({ level: 'silent' }), // pas de logs verbeux Baileys
+    browser: ['Wine Cellar Bot', 'Chrome', '5.0.0'],
   });
 
-  whatsappClient.on('qr', qr => {
-    console.log('QR Code recu, disponible sur le dashboard');
-    dernierQrCode = qr;
-    io.emit('qr_needed');
-    io.emit('qr_code', qr);
-  });
+  // Persistance des credentials à chaque changement
+  sock.ev.on('creds.update', saveCreds);
 
-  whatsappClient.on('ready', async () => {
-    dernierQrCode = null;
-    console.log('\nBot connecte ! Numero :', whatsappClient.info.wid.user);
-    try {
-      const waVersion = await whatsappClient.getWWebVersion();
-      console.log('>>> WA Web version chargee:', waVersion);
-    } catch(e) {
-      console.log('>>> Impossible de lire la version WA Web:', e.message);
-    }
-    console.log('Dashboard : http://localhost:' + PORT + '\n');
-    io.emit('whatsapp_ready');
-    if (ODOO_API_KEY) {
-      console.log('Sync clients Odoo...');
-      clientsOdoo = await construireCacheClients();
-    }
-  });
-
-  whatsappClient.on('message', async msg => {
-    if (msg.fromMe) return;
-    // console.log('MSG DE :', msg.from, '|', msg.body.slice(0, 50));
-
-    if (msg.type === 'sticker' && msg.hasMedia && !fs.existsSync(STICKER_FILE)) {
-      try {
-        const media = await msg.downloadMedia();
-        fs.writeFileSync(STICKER_FILE, Buffer.from(media.data, 'base64'));
-        console.log('Sticker capture !');
-      } catch (e) { console.log('Sticker :', e.message); }
-      return;
+  // Connexion / QR / déconnexion
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+    if (qr) {
+      console.log('QR Code recu, disponible sur le dashboard');
+      dernierQrCode = qr;
+      io.emit('qr_needed');
+      io.emit('qr_code', qr);
     }
 
-    if (!state.venteActive) return;
-    const estDuGroupe = msg.from === GROUPE_ID;
-    const estMessagePrive = !msg.from.includes('@g.us');
-    if (!estDuGroupe && !estMessagePrive) return;
-
-    const numeroContact = await getNumeroReel(msg);
-    const nom = (msg._data && msg._data.notifyName) || (clientsOdoo[numeroContact] && clientsOdoo[numeroContact].nom) || '';
-
-    await traiterCommande(msg, msg.body, numeroContact, nom, estDuGroupe);
-
-    if (stockTotalRestant() === 0) {
-      state.venteActive = false; sauvegarderEtat();
-      io.emit('sold_out'); await sequenceSoldOut();
-    }
-  });
-
-  whatsappClient.on('message_edit', async (msg, newBody, oldBody) => {
-    if (msg.fromMe) return;
-    if (!state.venteActive) { console.log('Edit ignore'); return; }
-
-    const estDuGroupe = msg.from === GROUPE_ID;
-    const estMessagePrive = !msg.from.includes('@g.us');
-    if (!estDuGroupe && !estMessagePrive) return;
-
-    const numeroContact = await getNumeroReel(msg);
-    const nom = (msg._data && msg._data.notifyName) || (clientsOdoo[numeroContact] && clientsOdoo[numeroContact].nom) || '';
-    console.log('EDIT ' + (nom || numeroContact) + ' | "' + oldBody + '" -> "' + newBody + '"');
-
-    const cmdIndex = state.commandes.findIndex(c => c.numero === numeroContact && c.msgOriginal === oldBody);
-    const entreeHistorique = { heure: new Date().toLocaleTimeString('fr-BE'), numero: numeroContact, nom, ancienMessage: oldBody, nouveauMessage: newBody, action: '' };
-
-    if (cmdIndex === -1) {
-      const nouvellesLignes = parseCommandeMulti(newBody);
-      if (nouvellesLignes) {
-        entreeHistorique.action = 'nouveau_depuis_edit';
-        const msgId = (msg.id && msg.id._serialized) ? msg.id._serialized : (numeroContact + '|' + oldBody);
-        messagesTraites.delete(msgId);
-        await traiterCommande(msg, newBody, numeroContact, nom, estDuGroupe);
-      } else { entreeHistorique.action = 'ignore'; }
-    } else {
-      const ancienneCommande = state.commandes[cmdIndex];
-      for (const ligne of ancienneCommande.lignes) {
-        const vin = state.vins.find(v => v.lettre === ligne.lettre);
-        if (vin) vin.stockRestant += ligne.qte;
+    if (connection === 'open') {
+      dernierQrCode = null;
+      const numero = sock.user?.id?.split(':')[0] || sock.user?.id || '?';
+      console.log('\nBot connecte ! Numero :', numero);
+      console.log('Dashboard : http://localhost:' + PORT + '\n');
+      io.emit('whatsapp_ready');
+      if (ODOO_API_KEY) {
+        console.log('Sync clients Odoo...');
+        clientsOdoo = await construireCacheClients();
       }
-      const nouvellesLignes = parseCommandeMulti(newBody);
-      if (!nouvellesLignes) {
-        state.commandes.splice(cmdIndex, 1);
-        entreeHistorique.action = 'annulation';
-        reagirAvecDelai(msg, '\u274c');
+    }
+
+    if (connection === 'close') {
+      io.emit('whatsapp_disconnected');
+      const code = lastDisconnect?.error?.output?.statusCode;
+      const deconnecteVolontairement = code === DisconnectReason.loggedOut;
+      console.log('WhatsApp deconnecte. Code :', code, '| Reconnexion :', !deconnecteVolontairement);
+      if (!deconnecteVolontairement) {
+        // Pause courte avant reconnexion pour éviter les boucles trop rapides
+        setTimeout(demarrerWhatsApp, 5000);
+      }
+    }
+  });
+
+  // Réception des messages
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return; // ignorer les messages d'historique
+
+    for (const msg of messages) {
+      if (msg.key.fromMe) continue; // ignorer les messages envoyés par le bot
+
+      // Récupérer le contenu texte du message
+      const body = msg.message?.conversation
+        || msg.message?.extendedTextMessage?.text
+        || msg.message?.imageMessage?.caption
+        || '';
+
+      // Capturer le sticker sold-out si pas encore enregistré
+      if (msg.message?.stickerMessage && !fs.existsSync(STICKER_FILE)) {
+        try {
+          const buffer = await downloadMediaMessage(msg, 'buffer', {});
+          fs.writeFileSync(STICKER_FILE, buffer);
+          console.log('Sticker capture !');
+        } catch (e) { console.log('Sticker :', e.message); }
+        continue; // ne pas traiter comme commande
+      }
+
+      if (!state.venteActive) continue;
+
+      const estDuGroupe = msg.key.remoteJid === GROUPE_ID;
+      const estMessagePrive = !msg.key.remoteJid.includes('@g.us');
+      if (!estDuGroupe && !estMessagePrive) continue;
+
+      const numeroContact = getNumeroReel(msg);
+      const nom = msg.pushName || clientsOdoo[numeroContact]?.nom || '';
+
+      await traiterCommande(msg, body, numeroContact, nom, estDuGroupe);
+
+      if (stockTotalRestant() === 0) {
+        state.venteActive = false; sauvegarderEtat();
+        io.emit('sold_out'); await sequenceSoldOut();
+      }
+    }
+  });
+
+  // Messages édités
+  // En Baileys, les édits arrivent comme un protocolMessage de type 14 dans messages.upsert
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+    for (const msg of messages) {
+      if (msg.key.fromMe) continue;
+      if (msg.message?.protocolMessage?.type !== 14) continue; // 14 = MESSAGE_EDIT
+      if (!state.venteActive) { console.log('Edit ignore (vente inactive)'); continue; }
+
+      const proto = msg.message.protocolMessage;
+      const originalKey = proto.key; // clé du message original
+      const newBody = proto.editedMessage?.conversation
+        || proto.editedMessage?.extendedTextMessage?.text
+        || '';
+
+      const estDuGroupe = msg.key.remoteJid === GROUPE_ID;
+      const estMessagePrive = !msg.key.remoteJid.includes('@g.us');
+      if (!estDuGroupe && !estMessagePrive) continue;
+
+      const numeroContact = getNumeroReel(msg);
+      const nom = msg.pushName || clientsOdoo[numeroContact]?.nom || '';
+
+      // Trouver la commande originale par l'ID du message original
+      const originalMsgId = originalKey?.id || '';
+      const cmdIndex = state.commandes.findIndex(c =>
+        c.numero === numeroContact && c.waMsgId === originalMsgId
+      );
+
+      const entreeHistorique = {
+        heure: new Date().toLocaleTimeString('fr-BE'),
+        numero: numeroContact, nom,
+        ancienMessage: cmdIndex >= 0 ? state.commandes[cmdIndex].msgOriginal : '(inconnu)',
+        nouveauMessage: newBody, action: ''
+      };
+
+      if (cmdIndex === -1) {
+        // Pas de commande originale trouvée (ex : faute de frappe initiale refusée)
+        const nouvellesLignes = parseCommandeMulti(newBody);
+        if (nouvellesLignes) {
+          entreeHistorique.action = 'nouveau_depuis_edit';
+          // Effacer anti-doublon pour l'ID original
+          messagesTraites.delete(originalMsgId);
+          await traiterCommande(msg, newBody, numeroContact, nom, estDuGroupe);
+        } else { entreeHistorique.action = 'ignore'; }
       } else {
-        const lignesValidees = [];
-        let aEteModifie = false, aEteRefuse = false;
-        for (const { lettre, qte } of nouvellesLignes) {
-          const qteOriginale = qte;
-          const vin = state.vins.find(v => v.lettre === lettre);
-          if (!vin) continue;
-          if (vin.stockRestant <= 0) { aEteRefuse = true; continue; }
-          if (vin.min && qte < vin.min) { aEteRefuse = true; continue; }
-          let qteFinale = qte, modifie = false;
-          if (vin.max) {
-            const dejaCommande = dejaCommandePar(numeroContact, lettre);
-            const resteAutorise = vin.max - dejaCommande;
-            if (resteAutorise <= 0) { aEteRefuse = true; continue; }
-            if (qteFinale > resteAutorise) { qteFinale = resteAutorise; modifie = true; aEteModifie = true; }
-          }
-          if (qteFinale > vin.stockRestant) { qteFinale = vin.stockRestant; aEteModifie = true; modifie = true; }
-          lignesValidees.push({ lettre, qte: qteFinale, odooId: vin.odooId, modifie: modifie || qteFinale < qteOriginale });
+        // Remettre le stock de l'ancienne commande
+        const ancienneCommande = state.commandes[cmdIndex];
+        for (const ligne of ancienneCommande.lignes) {
+          const vin = state.vins.find(v => v.lettre === ligne.lettre);
+          if (vin) vin.stockRestant += ligne.qte;
         }
-        if (lignesValidees.length > 0) {
-          for (const ligne of lignesValidees) {
-            const vin = state.vins.find(v => v.lettre === ligne.lettre);
-            if (vin) vin.stockRestant -= ligne.qte;
-          }
-          state.commandes[cmdIndex] = { ...ancienneCommande, lignes: lignesValidees, msgOriginal: newBody, edite: true };
-          reagirAvecDelai(msg, (aEteModifie || aEteRefuse) ? '\ud83d\udc47' : '\ud83d\udc4d');
-          entreeHistorique.action = 'modification';
-        } else {
+        const nouvellesLignes = parseCommandeMulti(newBody);
+        if (!nouvellesLignes) {
           state.commandes.splice(cmdIndex, 1);
+          entreeHistorique.action = 'annulation';
           reagirAvecDelai(msg, '\u274c');
-          entreeHistorique.action = 'annulation_min';
+        } else {
+          // Re-valider comme une nouvelle commande (logique identique à traiterCommande)
+          const lignesValidees = [];
+          let aEteModifie = false, aEteRefuse = false;
+          for (const { lettre, qte } of nouvellesLignes) {
+            const qteOriginale = qte;
+            const vin = state.vins.find(v => v.lettre === lettre);
+            if (!vin) continue;
+            if (vin.stockRestant <= 0) { aEteRefuse = true; continue; }
+            if (vin.min && qte < vin.min) { aEteRefuse = true; continue; }
+            let qteFinale = qte, modifie = false;
+            if (vin.max) {
+              const dejaCommande = dejaCommandePar(numeroContact, lettre);
+              const resteAutorise = vin.max - dejaCommande;
+              if (resteAutorise <= 0) { aEteRefuse = true; continue; }
+              if (qteFinale > resteAutorise) { qteFinale = resteAutorise; modifie = true; aEteModifie = true; }
+            }
+            if (qteFinale > vin.stockRestant) { qteFinale = vin.stockRestant; aEteModifie = true; modifie = true; }
+            lignesValidees.push({ lettre, qte: qteFinale, odooId: vin.odooId, modifie: modifie || qteFinale < qteOriginale });
+          }
+          if (lignesValidees.length > 0) {
+            for (const ligne of lignesValidees) {
+              const vin = state.vins.find(v => v.lettre === ligne.lettre);
+              if (vin) vin.stockRestant -= ligne.qte;
+            }
+            state.commandes[cmdIndex] = { ...ancienneCommande, lignes: lignesValidees, msgOriginal: newBody, edite: true };
+            reagirAvecDelai(msg, (aEteModifie || aEteRefuse) ? '\ud83d\udc47' : '\ud83d\udc4d');
+            entreeHistorique.action = 'modification';
+          } else {
+            state.commandes.splice(cmdIndex, 1);
+            reagirAvecDelai(msg, '\u274c');
+            entreeHistorique.action = 'annulation_min';
+          }
         }
       }
-    }
 
-    state.historique_edits = state.historique_edits || [];
-    state.historique_edits.push(entreeHistorique);
-    sauvegarderEtat(); io.emit('update', state);
+      state.historique_edits = state.historique_edits || [];
+      state.historique_edits.push(entreeHistorique);
+      sauvegarderEtat(); io.emit('update', state);
 
-    if (stockTotalRestant() === 0) {
-      state.venteActive = false; sauvegarderEtat();
-      io.emit('sold_out'); await sequenceSoldOut();
+      if (stockTotalRestant() === 0) {
+        state.venteActive = false; sauvegarderEtat();
+        io.emit('sold_out'); await sequenceSoldOut();
+      }
     }
   });
-
-  whatsappClient.on('disconnected', () => {
-    console.log('WhatsApp deconnecte.');
-    io.emit('whatsapp_disconnected');
-  });
-
-  nettoyerVerrousChromium();
-  whatsappClient.initialize();
 }
 
 server.listen(PORT, () => {
