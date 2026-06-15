@@ -290,8 +290,6 @@ function construireMessageVente() {
     if (vin.min && vin.min > 1) msg += '   \u2b07\ufe0f Minimum ' + vin.min + ' ' + (vin.min > 1 ? mots.qtePlur : mots.qteSing) + ' par commande\n';
   });
   msg += '\n' + '\u2500'.repeat(30) + '\n';
-  // Texte de fin : champ personnalisable depuis le dashboard.
-  // Fallback sur le texte par defaut si absent (anciennes ventes sauvegardees avant cette version).
   const texteFin = (typeof state.texteFin === 'string') ? state.texteFin : TEXTE_FIN_DEFAUT;
   if (texteFin.trim()) msg += '\n' + texteFin;
   return msg;
@@ -485,7 +483,7 @@ async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe) {
     if (vin && vin.stockRestant === 0) {
       const mots = motsContenant(vin.contenant);
       const msgSoldOut = '\ud83d\udd34 *' + vin.lettre + '. ' + vin.nom + ' \u2014 SOLD OUT !*\n\n' + mots.tous + ' ' + mots.qtePlur + ' ont trouv\u00e9 preneur. Merci ! \ud83c\udf77';
-      try { await whatsappClient.sendMessage(GROUPE_ID, msgSoldOut); }
+      try { await sock.sendMessage(GROUPE_ID, { text: msgSoldOut }); }
       catch (e) { console.log('Erreur sold out vin :', e.message); }
     }
   }
@@ -496,7 +494,7 @@ async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe) {
     numero: numeroContact, nom: clientOdoo.nom || nom,
     odoo_client_id: clientOdoo.odoo_id || null,
     lignes: lignesValidees, source: estDuGroupe ? 'groupe' : 'prive', msgOriginal: body,
-    waMsgId: msg.key?.id || null   // ← ajouter cette ligne pour la détection des édits
+    waMsgId: msg.key?.id || null
   };
   state.commandes.push(commande);
   sauvegarderEtat();
@@ -623,7 +621,7 @@ app.post('/api/nouvelle-vente', requireAuth, async (req, res) => {
   sauvegarderEtat();
   io.emit('update', state);
   try {
-    await whatsappClient.sendMessage(GROUPE_ID, construireMessageVente());
+    await sock.sendMessage(GROUPE_ID, { text: construireMessageVente() });
     console.log('\nVente demarree : ' + vinsAvecLettres.length + ' vins');
     res.json({ ok: true });
   } catch (e) {
@@ -662,7 +660,7 @@ app.post('/api/stopper', requireAuth, (req, res) => {
 
 app.post('/api/envoyer-stocks', requireAuth, async (req, res) => {
   if (state.vins.length === 0) return res.status(400).json({ error: 'Aucune vente en cours' });
-  try { await whatsappClient.sendMessage(GROUPE_ID, construireMessageStocks()); res.json({ ok: true }); }
+  try { await sock.sendMessage(GROUPE_ID, { text: construireMessageStocks() }); res.json({ ok: true }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -811,25 +809,21 @@ setInterval(() => {
 // ---------- WHATSAPP ----------
 let sock = null;
 
-// ---------- WHATSAPP (Baileys) ----------
 async function demarrerWhatsApp() {
   if (!GROUPE_ID) console.log('GROUPE_ID non defini dans le .env !');
 
-  // Session persistante dans le même dossier que l'ancien volume Railway
-  // (le volume reste monté sur /app/.wwebjs_auth — on le réutilise pour Baileys)
+  // Session persistante dans le volume Railway (réutilise le dossier wwebjs_auth existant)
   const { state: waAuthState, saveCreds } = await useMultiFileAuthState('./.wwebjs_auth');
 
   sock = makeWASocket({
     auth: waAuthState,
-    printQRInTerminal: false, // on gère le QR via le dashboard
-    logger: pino({ level: 'silent' }), // pas de logs verbeux Baileys
+    printQRInTerminal: false,
+    logger: pino({ level: 'silent' }),
     browser: ['Wine Cellar Bot', 'Chrome', '5.0.0'],
   });
 
-  // Persistance des credentials à chaque changement
   sock.ev.on('creds.update', saveCreds);
 
-  // Connexion / QR / déconnexion
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
     if (qr) {
       console.log('QR Code recu, disponible sur le dashboard');
@@ -856,20 +850,21 @@ async function demarrerWhatsApp() {
       const deconnecteVolontairement = code === DisconnectReason.loggedOut;
       console.log('WhatsApp deconnecte. Code :', code, '| Reconnexion :', !deconnecteVolontairement);
       if (!deconnecteVolontairement) {
-        // Pause courte avant reconnexion pour éviter les boucles trop rapides
         setTimeout(demarrerWhatsApp, 5000);
       }
     }
   });
 
-  // Réception des messages
+  // Réception des messages normaux
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return; // ignorer les messages d'historique
+    if (type !== 'notify') return;
 
     for (const msg of messages) {
-      if (msg.key.fromMe) continue; // ignorer les messages envoyés par le bot
+      if (msg.key.fromMe) continue;
 
-      // Récupérer le contenu texte du message
+      // Ignorer les messages édités (traités par le listener suivant)
+      if (msg.message?.protocolMessage?.type === 14) continue;
+
       const body = msg.message?.conversation
         || msg.message?.extendedTextMessage?.text
         || msg.message?.imageMessage?.caption
@@ -882,7 +877,7 @@ async function demarrerWhatsApp() {
           fs.writeFileSync(STICKER_FILE, buffer);
           console.log('Sticker capture !');
         } catch (e) { console.log('Sticker :', e.message); }
-        continue; // ne pas traiter comme commande
+        continue;
       }
 
       if (!state.venteActive) continue;
@@ -903,17 +898,16 @@ async function demarrerWhatsApp() {
     }
   });
 
-  // Messages édités
-  // En Baileys, les édits arrivent comme un protocolMessage de type 14 dans messages.upsert
+  // Messages édités (protocolMessage type 14)
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
     for (const msg of messages) {
       if (msg.key.fromMe) continue;
-      if (msg.message?.protocolMessage?.type !== 14) continue; // 14 = MESSAGE_EDIT
+      if (msg.message?.protocolMessage?.type !== 14) continue;
       if (!state.venteActive) { console.log('Edit ignore (vente inactive)'); continue; }
 
       const proto = msg.message.protocolMessage;
-      const originalKey = proto.key; // clé du message original
+      const originalKey = proto.key;
       const newBody = proto.editedMessage?.conversation
         || proto.editedMessage?.extendedTextMessage?.text
         || '';
@@ -925,7 +919,6 @@ async function demarrerWhatsApp() {
       const numeroContact = getNumeroReel(msg);
       const nom = msg.pushName || clientsOdoo[numeroContact]?.nom || '';
 
-      // Trouver la commande originale par l'ID du message original
       const originalMsgId = originalKey?.id || '';
       const cmdIndex = state.commandes.findIndex(c =>
         c.numero === numeroContact && c.waMsgId === originalMsgId
@@ -939,16 +932,13 @@ async function demarrerWhatsApp() {
       };
 
       if (cmdIndex === -1) {
-        // Pas de commande originale trouvée (ex : faute de frappe initiale refusée)
         const nouvellesLignes = parseCommandeMulti(newBody);
         if (nouvellesLignes) {
           entreeHistorique.action = 'nouveau_depuis_edit';
-          // Effacer anti-doublon pour l'ID original
           messagesTraites.delete(originalMsgId);
           await traiterCommande(msg, newBody, numeroContact, nom, estDuGroupe);
         } else { entreeHistorique.action = 'ignore'; }
       } else {
-        // Remettre le stock de l'ancienne commande
         const ancienneCommande = state.commandes[cmdIndex];
         for (const ligne of ancienneCommande.lignes) {
           const vin = state.vins.find(v => v.lettre === ligne.lettre);
@@ -960,7 +950,6 @@ async function demarrerWhatsApp() {
           entreeHistorique.action = 'annulation';
           reagirAvecDelai(msg, '\u274c');
         } else {
-          // Re-valider comme une nouvelle commande (logique identique à traiterCommande)
           const lignesValidees = [];
           let aEteModifie = false, aEteRefuse = false;
           for (const { lettre, qte } of nouvellesLignes) {
