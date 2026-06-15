@@ -621,8 +621,9 @@ app.post('/api/nouvelle-vente', requireAuth, async (req, res) => {
   sauvegarderEtat();
   io.emit('update', state);
   try {
-    await sock.sendMessage(GROUPE_ID, { text: construireMessageVente() });
+    const sendResult = await sock.sendMessage(GROUPE_ID, { text: construireMessageVente() });
     console.log('\nVente demarree : ' + vinsAvecLettres.length + ' vins');
+    console.log('sendMessage result key:', sendResult?.key?.id?.substring(0, 10) || 'null/undefined');
     res.json({ ok: true });
   } catch (e) {
     console.log('===== DETAIL ERREUR ENVOI =====');
@@ -811,6 +812,7 @@ let sock = null;
 
 async function demarrerWhatsApp() {
   if (!GROUPE_ID) console.log('GROUPE_ID non defini dans le .env !');
+  console.log('GROUPE_ID configuré :', GROUPE_ID);
 
   // Session persistante dans le volume Railway (réutilise le dossier wwebjs_auth existant)
   const { state: waAuthState, saveCreds } = await useMultiFileAuthState('./.wwebjs_auth');
@@ -857,6 +859,14 @@ async function demarrerWhatsApp() {
 
   // Réception des messages normaux
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    // DIAGNOSTIC — à retirer une fois la prod stable
+    console.log('[UPSERT] type:', type, '| nb messages:', messages.length);
+    for (const m of messages) {
+      const msgType = Object.keys(m.message || {}).filter(k => k !== 'messageContextInfo')[0] || 'none';
+      console.log('  remoteJid:', m.key.remoteJid, '| fromMe:', m.key.fromMe, '| msgType:', msgType);
+    }
+    // FIN DIAGNOSTIC
+
     if (type !== 'notify') return;
 
     for (const msg of messages) {
@@ -865,9 +875,13 @@ async function demarrerWhatsApp() {
       // Ignorer les messages édités (traités par le listener suivant)
       if (msg.message?.protocolMessage?.type === 14) continue;
 
+      // Extraction du corps — couvre tous les formats Baileys 7.x
       const body = msg.message?.conversation
         || msg.message?.extendedTextMessage?.text
         || msg.message?.imageMessage?.caption
+        || msg.message?.videoMessage?.caption
+        || msg.message?.buttonsResponseMessage?.selectedDisplayText
+        || msg.message?.listResponseMessage?.title
         || '';
 
       // Capturer le sticker sold-out si pas encore enregistré
@@ -884,6 +898,8 @@ async function demarrerWhatsApp() {
 
       const estDuGroupe = msg.key.remoteJid === GROUPE_ID;
       const estMessagePrive = !msg.key.remoteJid.includes('@g.us');
+      // DIAGNOSTIC JID
+      console.log('  [JID] remoteJid:', msg.key.remoteJid, '| estDuGroupe:', estDuGroupe, '| estPrive:', estMessagePrive, '| body:', body.slice(0, 20));
       if (!estDuGroupe && !estMessagePrive) continue;
 
       const numeroContact = getNumeroReel(msg);
