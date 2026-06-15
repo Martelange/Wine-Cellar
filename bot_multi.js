@@ -405,7 +405,8 @@ function programmerVenteServeur(heureISO, texteLibre, texteFin, vins) {
     io.emit('update', state);
 
     try {
-      await whatsappClient.sendMessage(GROUPE_ID, construireMessageVente());
+      //await whatsappClient.sendMessage(GROUPE_ID, construireMessageVente());
+      await whatsappClient.sendMessage('32456723677@c.us', 'Test envoi prive');
       console.log('\nVente programmee lancee : ' + vinsAvecLettres.length + ' vins');
       io.emit('vente_lancee_auto');
     } catch (e) { console.log('Erreur envoi vente programmee :', e.message); }
