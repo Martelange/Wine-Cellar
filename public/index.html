@@ -170,6 +170,31 @@
       <!-- 2. ACTIONS -->
       <div class="card">
         <div class="card-title">Actions</div>
+
+        <!-- Sélecteur de groupe WhatsApp -->
+        <div id="groupe-selector-box" style="background:#2a1a0e;border:1px solid #5c3317;border-radius:8px;padding:10px 12px;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+            <span style="font-size:1rem;">💬</span>
+            <div style="min-width:0;">
+              <div style="font-size:.72rem;color:#c9956a;text-transform:uppercase;letter-spacing:.04em;">Groupe actif</div>
+              <div id="groupe-actif-label" style="font-size:.85rem;font-weight:600;color:#f5e6d0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">—</div>
+            </div>
+          </div>
+          <button id="btn-changer-groupe" onclick="ouvrirSelecteurGroupe()" style="background:#5c3317;border:none;color:#f5e6d0;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:.75rem;white-space:nowrap;flex-shrink:0;">Changer</button>
+        </div>
+
+        <!-- Modal sélecteur de groupe -->
+        <div id="modal-groupe" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center;">
+          <div style="background:#1e0f05;border:1px solid #5c3317;border-radius:12px;padding:24px;max-width:340px;width:90%;">
+            <div style="font-size:1rem;font-weight:700;color:#f5e6d0;margin-bottom:6px;">💬 Choisir le groupe WhatsApp</div>
+            <div style="font-size:.8rem;color:#c9956a;margin-bottom:16px;">Le bot enverra les messages dans le groupe sélectionné.</div>
+            <div id="modal-groupe-liste" style="display:flex;flex-direction:column;gap:8px;"></div>
+            <div style="margin-top:16px;display:flex;justify-content:flex-end;">
+              <button onclick="fermerModalGroupe()" style="background:none;border:1px solid #5c3317;color:#c9956a;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:.8rem;">Annuler</button>
+            </div>
+          </div>
+        </div>
+
         <div class="warn-msg" id="warn-msg"></div>
         <button class="btn btn-start" id="btn-start" onclick="lancerVente()">⚡ Lancer la vente maintenant</button>
 
@@ -444,6 +469,7 @@ function afficherDashboard() {
 function initDashboard() {
   socket=io();
   authFetch('/api/etat').then(r=>r.json()).then(updateUI);
+  chargerGroupes();
   socket.on('update', updateUI);
   socket.on('nouvelle_commande', c=>{ if(!state)return; ajouterLigneCmd(c,state.commandes.length,true); });
   socket.on('sold_out', ()=>{ document.getElementById('status-dot').className='dot sold'; });
@@ -1002,6 +1028,75 @@ async function creerSalesOrders() {
     alert(msg);
   });
 }
+
+// ── SÉLECTEUR DE GROUPE ──────────────────────────────────────
+let groupesDisponibles = [];
+let groupeActifId = null;
+
+function chargerGroupes() {
+  authFetch('/api/groupes').then(r => r.json()).then(data => {
+    groupesDisponibles = data.disponibles || [];
+    groupeActifId = data.actifId || '';
+    afficherGroupeActif();
+  }).catch(() => {});
+}
+
+function afficherGroupeActif() {
+  const label = document.getElementById('groupe-actif-label');
+  if (!label) return;
+  const found = groupesDisponibles.find(g => g.id === groupeActifId);
+  if (found) label.textContent = found.label + ' (' + found.id.slice(0, 18) + '...)';
+  else if (groupeActifId) label.textContent = groupeActifId.slice(0, 25) + '...';
+  else label.textContent = 'Non configuré';
+  const btn = document.getElementById('btn-changer-groupe');
+  if (btn) btn.style.display = groupesDisponibles.length <= 1 ? 'none' : '';
+}
+
+function ouvrirSelecteurGroupe() {
+  if (state && state.venteActive) {
+    alert('⚠️ Impossible de changer de groupe pendant une vente active.\nStoppez la vente d\'abord.');
+    return;
+  }
+  const liste = document.getElementById('modal-groupe-liste');
+  liste.innerHTML = '';
+  if (groupesDisponibles.length === 0) {
+    liste.innerHTML = '<div style="color:#c9956a;font-size:.82rem;">Aucun groupe configuré.<br>Ajoutez GROUPE_PRINCIPAL et GROUPE_TEST dans Railway.</div>';
+  } else {
+    groupesDisponibles.forEach(g => {
+      const estActif = g.id === groupeActifId;
+      const btn = document.createElement('button');
+      btn.style.cssText = 'width:100%;padding:10px 14px;border-radius:8px;border:2px solid ' +
+        (estActif ? '#f5c842' : '#5c3317') + ';background:' + (estActif ? '#3a2000' : 'none') +
+        ';color:#f5e6d0;cursor:pointer;text-align:left;font-size:.85rem;font-weight:' + (estActif ? '700' : '400') + ';';
+      btn.textContent = (estActif ? '✅ ' : '') + g.label;
+      const small = document.createElement('div');
+      small.style.cssText = 'font-size:.7rem;color:#c9956a;margin-top:2px;';
+      small.textContent = g.id;
+      btn.appendChild(small);
+      if (!estActif) btn.onclick = () => confirmerChangementGroupe(g);
+      liste.appendChild(btn);
+    });
+  }
+  document.getElementById('modal-groupe').style.display = 'flex';
+}
+
+function fermerModalGroupe() {
+  document.getElementById('modal-groupe').style.display = 'none';
+}
+
+function confirmerChangementGroupe(groupe) {
+  if (!confirm('Basculer vers le groupe « ' + groupe.label + ' » ?\n\nLe bot enverra les prochains messages dans ce groupe.')) return;
+  fermerModalGroupe();
+  authFetch('/api/groupe-actif', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupeId: groupe.id })
+  }).then(r => r.json()).then(d => {
+    if (d.ok) { groupeActifId = groupe.id; afficherGroupeActif(); }
+    else alert('Erreur : ' + (d.error || 'inconnue'));
+  }).catch(() => alert('Erreur réseau'));
+}
+
 </script>
 </body>
 </html>

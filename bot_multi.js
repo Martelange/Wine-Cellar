@@ -16,7 +16,17 @@ const path = require('path');
 // ---------- CONFIG ----------
 const PORT = process.env.PORT || 3000;
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || 'moncode123';
-const GROUPE_ID = process.env.GROUPE_ID || '';
+const GROUPE_ID = process.env.GROUPE_ID || '';  // rétrocompatibilité
+
+// ---------- GROUPES CONFIGURABLES ----------
+const GROUPES_DISPONIBLES = [
+  { id: process.env.GROUPE_PRINCIPAL || '', label: 'Principal' },
+  { id: process.env.GROUPE_TEST      || '', label: 'Test' },
+].filter(g => g.id.trim() !== '');
+
+function groupeActif() {
+  return state.groupeActifId || GROUPE_ID || (GROUPES_DISPONIBLES[0] && GROUPES_DISPONIBLES[0].id) || '';
+}
 
 const ODOO_URL = 'https://' + (process.env.ODOO_URL || '').replace(/^https?:\/\//, '');
 const ODOO_DB = process.env.ODOO_DB || '';
@@ -175,7 +185,7 @@ let clientsOdoo = chargerClients();
 // ---------- ETAT ----------
 function etatInitial() {
   return {
-    texteLibre: '', texteFin: TEXTE_FIN_DEFAUT, vins: [], commandes: [], commandes_attente: [], venteActive: false,
+    texteLibre: '', texteFin: TEXTE_FIN_DEFAUT, vins: [], commandes: [], commandes_attente: [], venteActive: false, groupeActifId: null,
     dateVente: new Date().toISOString(), heureDebut: null,
     seuil50envoye: false, seuil20envoye: false, historique_edits: []
   };
@@ -183,7 +193,12 @@ function etatInitial() {
 
 function chargerEtat() {
   if (fs.existsSync(DATA_FILE)) {
-    try { const etat = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); etat.venteActive = false; return etat; }
+    try {
+      const etat = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+      etat.venteActive = false;
+      if (!etat.groupeActifId) etat.groupeActifId = GROUPE_ID || null;
+      return etat;
+    }
     catch { return etatInitial(); }
   }
   return etatInitial();
@@ -331,12 +346,12 @@ async function verifierSeuils() {
   if (!state.seuil50envoye && pct <= 50) {
     state.seuil50envoye = true; sauvegarderEtat();
     const msg = '\ud83d\udfe1 *Mi-parcours !*\n\n*' + vendues + ' bouteilles* vendues en ' + duree + ' !\nIl reste encore *' + restant + ' bouteilles* disponibles.\n\nDepêchez-vous... \u23f0';
-    try { await sock.sendMessage(GROUPE_ID, { text: msg }); } catch (e) { console.log('Erreur 50% :', e.message); }
+    try { await sock.sendMessage(groupeActif(), { text: msg }); } catch (e) { console.log('Erreur 50% :', e.message); }
   }
   if (!state.seuil20envoye && pct <= 20) {
     state.seuil20envoye = true; sauvegarderEtat();
     const msg = '\ud83d\udd34 *Plus que ' + restant + ' bouteilles !*\n\nOn a ecoule *' + vendues + ' bouteilles* en ' + duree + '...\nC\'est le moment ou jamais ! \ud83c\udf77';
-    try { await sock.sendMessage(GROUPE_ID, { text: msg }); } catch (e) { console.log('Erreur 20% :', e.message); }
+    try { await sock.sendMessage(groupeActif(), { text: msg }); } catch (e) { console.log('Erreur 20% :', e.message); }
   }
 }
 
@@ -349,13 +364,13 @@ async function sequenceSoldOut() {
   if (fs.existsSync(STICKER_FILE)) {
     try {
       const stickerBuffer = fs.readFileSync(STICKER_FILE);
-      await sock.sendMessage(GROUPE_ID, { sticker: stickerBuffer });
+      await sock.sendMessage(groupeActif(), { sticker: stickerBuffer });
     }
-    catch (e) { await sock.sendMessage(GROUPE_ID, { text: '\ud83d\udd34 *SOLD OUT !*' }); }
-  } else { await sock.sendMessage(GROUPE_ID, { text: '\ud83d\udd34 *SOLD OUT !*' }); }
+    catch (e) { await sock.sendMessage(groupeActif(), { text: '\ud83d\udd34 *SOLD OUT !*' }); }
+  } else { await sock.sendMessage(groupeActif(), { text: '\ud83d\udd34 *SOLD OUT !*' }); }
   setTimeout(async () => {
     const fin = '\ud83d\udd25 *SOLD OUT en ' + duree + '* \u26a1\n\n*Un enorme merci a tous* \ud83d\ude4f\nVous avez ete ultra rapides !\n\n\ud83d\udce6 *' + vendues + ' bouteilles* vendues\n\ud83d\udc65 *' + nbCommandes + ' commandes* enregistrees\n\nVous serez contactes prochainement. \ud83c\udf77';
-    try { await sock.sendMessage(GROUPE_ID, { text: fin }); } catch (e) { console.log('Erreur fin :', e.message); }
+    try { await sock.sendMessage(groupeActif(), { text: fin }); } catch (e) { console.log('Erreur fin :', e.message); }
   }, DELAI_MERCI);
 }
 
@@ -406,7 +421,7 @@ function programmerVenteServeur(heureISO, texteLibre, texteFin, vins) {
     io.emit('update', state);
 
     try {
-      await sock.sendMessage(GROUPE_ID, { text: construireMessageVente() });
+      await sock.sendMessage(groupeActif(), { text: construireMessageVente() });
       console.log('\nVente programmee lancee : ' + vinsAvecLettres.length + ' vins');
       io.emit('vente_lancee_auto');
     } catch (e) { console.log('Erreur envoi vente programmee :', e.message); }
@@ -483,7 +498,7 @@ async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe) {
     if (vin && vin.stockRestant === 0) {
       const mots = motsContenant(vin.contenant);
       const msgSoldOut = '\ud83d\udd34 *' + vin.lettre + '. ' + vin.nom + ' \u2014 SOLD OUT !*\n\n' + mots.tous + ' ' + mots.qtePlur + ' ont trouv\u00e9 preneur. Merci ! \ud83c\udf77';
-      try { await sock.sendMessage(GROUPE_ID, { text: msgSoldOut }); }
+      try { await sock.sendMessage(groupeActif(), { text: msgSoldOut }); }
       catch (e) { console.log('Erreur sold out vin :', e.message); }
     }
   }
@@ -621,7 +636,7 @@ app.post('/api/nouvelle-vente', requireAuth, async (req, res) => {
   sauvegarderEtat();
   io.emit('update', state);
   try {
-    const sendResult = await sock.sendMessage(GROUPE_ID, { text: construireMessageVente() });
+    const sendResult = await sock.sendMessage(groupeActif(), { text: construireMessageVente() });
     console.log('\nVente demarree : ' + vinsAvecLettres.length + ' vins');
     console.log('sendMessage result key:', sendResult?.key?.id?.substring(0, 10) || 'null/undefined');
     res.json({ ok: true });
@@ -661,7 +676,7 @@ app.post('/api/stopper', requireAuth, (req, res) => {
 
 app.post('/api/envoyer-stocks', requireAuth, async (req, res) => {
   if (state.vins.length === 0) return res.status(400).json({ error: 'Aucune vente en cours' });
-  try { await sock.sendMessage(GROUPE_ID, { text: construireMessageStocks() }); res.json({ ok: true }); }
+  try { await sock.sendMessage(groupeActif(), { text: construireMessageStocks() }); res.json({ ok: true }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -811,8 +826,9 @@ setInterval(() => {
 let sock = null;
 
 async function demarrerWhatsApp() {
-  if (!GROUPE_ID) console.log('GROUPE_ID non defini dans le .env !');
-  console.log('GROUPE_ID configuré :', GROUPE_ID);
+  const gId = groupeActif();
+  if (!gId) console.log('Aucun groupe WhatsApp configure');
+  else console.log('Groupe actif au demarrage :', gId);
 
   // Session persistante dans le volume Railway (réutilise le dossier wwebjs_auth existant)
   const { state: waAuthState, saveCreds } = await useMultiFileAuthState('./.wwebjs_auth');
@@ -896,7 +912,7 @@ async function demarrerWhatsApp() {
 
       if (!state.venteActive) continue;
 
-      const estDuGroupe = msg.key.remoteJid === GROUPE_ID;
+      const estDuGroupe = msg.key.remoteJid === groupeActif();
       const estMessagePrive = !msg.key.remoteJid.includes('@g.us');
       // DIAGNOSTIC JID
       console.log('  [JID] remoteJid:', msg.key.remoteJid, '| estDuGroupe:', estDuGroupe, '| estPrive:', estMessagePrive, '| body:', body.slice(0, 20));
@@ -928,7 +944,7 @@ async function demarrerWhatsApp() {
         || proto.editedMessage?.extendedTextMessage?.text
         || '';
 
-      const estDuGroupe = msg.key.remoteJid === GROUPE_ID;
+      const estDuGroupe = msg.key.remoteJid === groupeActif();
       const estMessagePrive = !msg.key.remoteJid.includes('@g.us');
       if (!estDuGroupe && !estMessagePrive) continue;
 
@@ -1011,6 +1027,26 @@ async function demarrerWhatsApp() {
     }
   });
 }
+
+
+// ---------- API GROUPES ----------
+app.get('/api/groupes', requireAuth, (req, res) => {
+  res.json({ disponibles: GROUPES_DISPONIBLES, actifId: groupeActif() });
+});
+
+app.post('/api/groupe-actif', requireAuth, (req, res) => {
+  if (state.venteActive) {
+    return res.status(400).json({ error: "Impossible de changer de groupe pendant une vente active. Stoppez la vente d'abord." });
+  }
+  const { groupeId } = req.body;
+  const groupe = GROUPES_DISPONIBLES.find(g => g.id === groupeId);
+  if (!groupe) return res.status(400).json({ error: 'Groupe inconnu : ' + groupeId });
+  state.groupeActifId = groupeId;
+  sauvegarderEtat();
+  io.emit('update', state);
+  console.log('Groupe actif change vers :', groupe.label, '(' + groupeId + ')');
+  res.json({ ok: true, label: groupe.label, id: groupeId });
+});
 
 server.listen(PORT, () => {
   console.log('Demarrage Wine Cellar Multi-Vins v5...');
