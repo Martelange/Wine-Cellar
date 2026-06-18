@@ -257,7 +257,7 @@ function parseCommandeMulti(msgBody) {
   const txt = msgBody.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(MOTS_IGNORES, ' ').replace(/[,;\/]/g, ' ').replace(/\s+/g, ' ').trim();
   const resultats = [];
-  const pattern = /(\d+)\s*([a-z])|([a-z])\s*(\d+)/gi;
+  const pattern = /(\d+)\s*([a-z])(?![a-z])|(?<![a-z])([a-z])\s*(\d+)/gi;
   let match;
   while ((match = pattern.exec(txt)) !== null) {
     let qte, lettre;
