@@ -5,7 +5,7 @@
 
 require('dotenv').config();
 
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const express = require('express');
 const http = require('http');
@@ -905,18 +905,38 @@ setInterval(() => {
 // ---------- WHATSAPP ----------
 let sock = null;
 let resetWhatsAppEnCours = false;
+let waVersionCache = null;
 let waConnecte = false;
 let waGeneration = 0;          // incremente a chaque (re)demarrage : invalide les anciennes sockets
 let waReconnectTimer = null;   // un seul timer de reconnexion a la fois
 let waEchecsConsecutifs = 0;   // pour le backoff
 
-// Planifie UNE reconnexion (jamais plusieurs en parallele), avec backoff
-// progressif 5s, 10s, 15s... plafonne a 60s. Evite les tempetes de reconnexion
-// qui font bannir le numero (code 405).
+// Version du protocole WhatsApp Web. La version embarquee par Baileys rc13 est
+// trop vieille et se fait refuser (code 405) -> on recupere la version courante.
+// Fallback : une version connue bonne (sept. 2026), plus recente que celle de rc13.
+async function obtenirVersionWA() {
+  if (waVersionCache) return waVersionCache;
+  try {
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log('Version WhatsApp Web :', version.join('.'), isLatest ? '(a jour)' : '(pas la plus recente)');
+    waVersionCache = version;
+    return version;
+  } catch (e) {
+    console.log('Recuperation version WA echouee (' + (e && e.message) + '), fallback 2.3000.1043857760');
+    return [2, 3000, 1043857760];
+  }
+}
+
+// Planifie UNE reconnexion (jamais plusieurs en parallele), avec backoff.
+// 5s, 10s, 20s, 40s... puis palier 5 min a partir de ~6 echecs. Objectif :
+// arreter de solliciter WhatsApp quand il bloque (code 405 apres abus) pour
+// laisser le blocage temporaire retomber.
 function planifierReconnexion() {
   if (waReconnectTimer || resetWhatsAppEnCours) return;
   waEchecsConsecutifs++;
-  const delai = Math.min(60000, 5000 * waEchecsConsecutifs);
+  const delai = waEchecsConsecutifs <= 5
+    ? 5000 * Math.pow(2, waEchecsConsecutifs - 1)   // 5s, 10s, 20s, 40s, 80s
+    : 300000;                                        // puis 5 min
   console.log('Reconnexion WhatsApp dans ' + Math.round(delai / 1000) + 's (tentative #' + waEchecsConsecutifs + ')');
   waReconnectTimer = setTimeout(() => { waReconnectTimer = null; demarrerWhatsApp(); }, delai);
 }
@@ -976,9 +996,11 @@ async function demarrerWhatsApp() {
 
   // Session persistante dans le volume Railway (réutilise le dossier wwebjs_auth existant)
   const { state: waAuthState, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const version = await obtenirVersionWA();
   if (gen !== waGeneration) return;   // une autre (re)initialisation a pris la main pendant l'await
 
   sock = makeWASocket({
+    version,
     auth: waAuthState,
     printQRInTerminal: false,
     logger: pino({ level: 'silent' }),
