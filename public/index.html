@@ -999,13 +999,30 @@ function updateConsolidation(s) {
 }
 
 // ── LANCEMENT VENTE ───────────────────────────────────────────
+function libelleGroupeActif() {
+  const g = groupesDisponibles.find(x => x.id === groupeActifId);
+  if (g) return g.label;
+  return groupeActifId ? (groupeActifId.slice(0, 20) + '…') : 'groupe par défaut';
+}
+function groupeActifEstPrincipal() {
+  const g = groupesDisponibles.find(x => x.id === groupeActifId);
+  // "Principal" par le label, ou repli quand aucun groupe n'a été choisi
+  return (g && /principal/i.test(g.label)) || !groupeActifId;
+}
+
 function lancerVente() {
   if(vins.length===0) return alert('Ajoute au moins un vin !');
+  const grp = libelleGroupeActif();
+  let msg;
   if(state&&state.venteActive){
-    if(!confirm('⚠️ Une vente est déjà en cours !\nRelancer quand même ?')) return;
+    msg = '⚠️ Une vente est déjà en cours !\n\nRelancer quand même dans le groupe « '+grp+' » ?';
+  } else if(groupeActifEstPrincipal()){
+    msg = '⚠️ Lancer la vente dans le GROUPE PRINCIPAL (« '+grp+' ») ?\n\n'
+        + 'C\'est le vrai groupe clients. Pour un test, ferme cette fenêtre et bascule d\'abord sur « Test » (bouton « Changer »).';
   } else {
-    if(!confirm('⚡ Envoyer le message de vente sur WhatsApp maintenant ?')) return;
+    msg = '⚡ Lancer la vente dans le groupe « '+grp+' » maintenant ?';
   }
+  if(!confirm(msg)) return;
   envoyerVente();
 }
 
@@ -1035,7 +1052,9 @@ function programmerVente() {
   const cible=new Date(); cible.setHours(h,m,0,0);
   if(cible<=maintenant) cible.setDate(cible.getDate()+1);
   const delaiMin=Math.round((cible-maintenant)/60000);
-  if(!confirm('⏰ Programmer la vente à '+heure+' ?\n(dans '+(delaiMin<60?delaiMin+' min':Math.floor(delaiMin/60)+'h'+delaiMin%60+'min')+')')) return;
+  const grp = libelleGroupeActif();
+  const alerteGrp = groupeActifEstPrincipal() ? '\n\n⚠️ GROUPE PRINCIPAL (vrai groupe clients)' : '';
+  if(!confirm('⏰ Programmer la vente à '+heure+' dans le groupe « '+grp+' » ?\n(dans '+(delaiMin<60?delaiMin+' min':Math.floor(delaiMin/60)+'h'+delaiMin%60+'min')+')'+alerteGrp)) return;
 
   const texteLibre=document.getElementById('texte-libre').value.trim();
   const texteFin=document.getElementById('texte-fin').value.trim();
@@ -1193,6 +1212,13 @@ function afficherGroupeActif() {
   if (found) label.textContent = found.label + ' (' + found.id.slice(0, 18) + '...)';
   else if (groupeActifId) label.textContent = groupeActifId.slice(0, 25) + '...';
   else label.textContent = 'Non configuré';
+  // repere visuel : rouge si groupe Principal (vrai groupe clients), vert si Test
+  const box = document.getElementById('groupe-selector-box');
+  if (box) {
+    const principal = groupeActifEstPrincipal();
+    box.style.borderColor = principal ? '#c62828' : '#2e7d32';
+    box.style.background = principal ? '#3a1410' : '#12240f';
+  }
   const btn = document.getElementById('btn-changer-groupe');
   if (btn) btn.style.display = groupesDisponibles.length <= 1 ? 'none' : '';
 }
