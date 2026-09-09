@@ -519,6 +519,7 @@ function initDashboard() {
     if(qrModal) qrModal.remove();
   });
   socket.on('whatsapp_disconnected', ()=>{ document.getElementById('wa-dot').className='dot sold'; document.getElementById('wa-label').textContent='Déconnecté'; });
+  socket.on('whatsapp_loggedout', ()=>{ document.getElementById('wa-dot').className='dot sold'; document.getElementById('wa-label').textContent='Session expirée — cliquez « Reconnecter WhatsApp »'; });
   socket.on('qr_needed', ()=>{ document.getElementById('wa-dot').className='dot waiting'; document.getElementById('wa-label').textContent='Scan QR...'; });
   socket.on('qr_code', qr => {
     document.getElementById('wa-dot').className='dot waiting';

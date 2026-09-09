@@ -560,7 +560,11 @@ app.use(express.json());
 
 let dernierQrCode = null;
 io.on('connection', socket => {
+  // pousser l'etat WhatsApp reel a l'ouverture du dashboard (sinon le bandeau
+  // reste bloque sur "Connexion...")
   if (dernierQrCode) socket.emit('qr_code', dernierQrCode);
+  else if (waConnecte) socket.emit('whatsapp_ready');
+  else socket.emit('whatsapp_disconnected');
   socket.emit('update', state);
   if (programmationHeure) socket.emit('programmation_status', { heureISO: programmationHeure });
 });
@@ -901,6 +905,21 @@ setInterval(() => {
 // ---------- WHATSAPP ----------
 let sock = null;
 let resetWhatsAppEnCours = false;
+let waConnecte = false;
+let waGeneration = 0;          // incremente a chaque (re)demarrage : invalide les anciennes sockets
+let waReconnectTimer = null;   // un seul timer de reconnexion a la fois
+let waEchecsConsecutifs = 0;   // pour le backoff
+
+// Planifie UNE reconnexion (jamais plusieurs en parallele), avec backoff
+// progressif 5s, 10s, 15s... plafonne a 60s. Evite les tempetes de reconnexion
+// qui font bannir le numero (code 405).
+function planifierReconnexion() {
+  if (waReconnectTimer || resetWhatsAppEnCours) return;
+  waEchecsConsecutifs++;
+  const delai = Math.min(60000, 5000 * waEchecsConsecutifs);
+  console.log('Reconnexion WhatsApp dans ' + Math.round(delai / 1000) + 's (tentative #' + waEchecsConsecutifs + ')');
+  waReconnectTimer = setTimeout(() => { waReconnectTimer = null; demarrerWhatsApp(); }, delai);
+}
 
 // Ferme la session WhatsApp courante, vide le dossier de session et relance une
 // connexion vierge (=> nouveau QR sur le dashboard). Declenche par le bouton
@@ -909,36 +928,55 @@ async function reinitialiserWhatsApp() {
   if (resetWhatsAppEnCours) return { error: 'Reinitialisation deja en cours' };
   resetWhatsAppEnCours = true;
   try {
+    if (waReconnectTimer) { clearTimeout(waReconnectTimer); waReconnectTimer = null; }
+    const etaitConnecte = waConnecte;
     dernierQrCode = null;
-    try {
-      await Promise.race([
-        Promise.resolve(sock?.logout?.()),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 2500)),
-      ]);
-    } catch (e) { console.log('logout WA :', e && e.message); }
-    try { sock?.end?.(new Error('reinit manuelle')); } catch (e) { console.log('end WA :', e && e.message); }
-    await new Promise(r => setTimeout(r, 1500));
+    waConnecte = false;
+    waGeneration++;   // invalide immediatement toutes les sockets/timers en vol
+    try { sock?.ev?.removeAllListeners?.(); } catch (e) {}
+    // logout propre seulement si on etait reellement connecte (sinon inutile et lent)
+    if (etaitConnecte && sock?.logout) {
+      try {
+        await Promise.race([
+          Promise.resolve(sock.logout()),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 2500)),
+        ]);
+      } catch (e) { console.log('logout WA :', e && e.message); }
+    }
+    try { sock?.end?.(undefined); } catch (e) {}
+    sock = null;
+    await new Promise(r => setTimeout(r, 800));
     try {
       for (const f of fs.readdirSync(AUTH_DIR)) {
         fs.rmSync(path.join(AUTH_DIR, f), { recursive: true, force: true });
       }
       console.log('Session WhatsApp effacee');
     } catch (e) { console.log('Effacement session WA :', e && e.message); }
+    waEchecsConsecutifs = 0;
     io.emit('whatsapp_disconnected');
+    await demarrerWhatsApp();
   } finally {
     resetWhatsAppEnCours = false;
   }
-  demarrerWhatsApp();
   return { ok: true };
 }
 
 async function demarrerWhatsApp() {
+  if (waReconnectTimer) { clearTimeout(waReconnectTimer); waReconnectTimer = null; }
+  const gen = ++waGeneration;
+
+  // fermer proprement toute socket precedente avant d'en creer une nouvelle
+  try { sock?.ev?.removeAllListeners?.(); } catch (e) {}
+  try { sock?.end?.(undefined); } catch (e) {}
+  waConnecte = false;
+
   const gId = groupeActif();
   if (!gId) console.log('Aucun groupe WhatsApp configure');
   else console.log('Groupe actif au demarrage :', gId);
 
   // Session persistante dans le volume Railway (réutilise le dossier wwebjs_auth existant)
   const { state: waAuthState, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  if (gen !== waGeneration) return;   // une autre (re)initialisation a pris la main pendant l'await
 
   sock = makeWASocket({
     auth: waAuthState,
@@ -950,15 +988,19 @@ async function demarrerWhatsApp() {
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+    if (gen !== waGeneration) return;   // event d'une socket obsolete
     if (qr) {
       console.log('QR Code recu, disponible sur le dashboard');
       dernierQrCode = qr;
+      waEchecsConsecutifs = 0;   // WhatsApp nous parle : le chemin de connexion fonctionne
       io.emit('qr_needed');
       io.emit('qr_code', qr);
     }
 
     if (connection === 'open') {
       dernierQrCode = null;
+      waConnecte = true;
+      waEchecsConsecutifs = 0;
       const numero = sock.user?.id?.split(':')[0] || sock.user?.id || '?';
       console.log('\nBot connecte ! Numero :', numero);
       console.log('Dashboard : http://localhost:' + PORT + '\n');
@@ -970,26 +1012,23 @@ async function demarrerWhatsApp() {
     }
 
     if (connection === 'close') {
+      waConnecte = false;
       io.emit('whatsapp_disconnected');
       const code = lastDisconnect?.error?.output?.statusCode;
       const deconnecteVolontairement = code === DisconnectReason.loggedOut;
-      console.log('WhatsApp deconnecte. Code :', code, '| Reconnexion :', !deconnecteVolontairement && !resetWhatsAppEnCours);
-      if (!deconnecteVolontairement && !resetWhatsAppEnCours) {
-        setTimeout(demarrerWhatsApp, 5000);
+      console.log('WhatsApp deconnecte. Code :', code);
+      if (deconnecteVolontairement) {
+        console.log('Session invalidee (loggedOut) — cliquer "Reconnecter WhatsApp" pour un nouveau QR');
+        io.emit('whatsapp_loggedout');
+      } else if (!resetWhatsAppEnCours) {
+        planifierReconnexion();
       }
     }
   });
 
   // Réception des messages normaux
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    // DIAGNOSTIC — à retirer une fois la prod stable
-    console.log('[UPSERT] type:', type, '| nb messages:', messages.length);
-    for (const m of messages) {
-      const msgType = Object.keys(m.message || {}).filter(k => k !== 'messageContextInfo')[0] || 'none';
-      console.log('  remoteJid:', m.key.remoteJid, '| fromMe:', m.key.fromMe, '| msgType:', msgType);
-    }
-    // FIN DIAGNOSTIC
-
+    if (gen !== waGeneration) return;
     if (type !== 'notify') return;
 
     for (const msg of messages) {
@@ -1021,8 +1060,6 @@ async function demarrerWhatsApp() {
 
       const estDuGroupe = msg.key.remoteJid === groupeActif();
       const estMessagePrive = !msg.key.remoteJid.includes('@g.us');
-      // DIAGNOSTIC JID
-      console.log('  [JID] remoteJid:', msg.key.remoteJid, '| estDuGroupe:', estDuGroupe, '| estPrive:', estMessagePrive, '| body:', body.slice(0, 20));
       if (!estDuGroupe && !estMessagePrive) continue;
 
       const numeroContact = getNumeroReel(msg);
@@ -1039,6 +1076,7 @@ async function demarrerWhatsApp() {
 
   // Messages édités (protocolMessage type 14)
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (gen !== waGeneration) return;
     if (type !== 'notify') return;
     for (const msg of messages) {
       if (msg.key.fromMe) continue;
