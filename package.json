@@ -2,9 +2,10 @@
   "name": "wine-cellar-bot",
   "version": "1.0.0",
   "description": "Bot WhatsApp ventes flash – Wine Cellar",
-  "main": "bot.js",
+  "main": "bot_multi.js",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node bot_multi.js",
+    "test": "node --test"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc13",

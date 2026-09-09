@@ -12,6 +12,8 @@ const http = require('http');
 const { Server } = require('socket.io');
 const fs = require('fs');
 const path = require('path');
+const { parseCommandeMulti } = require('./parsing');
+const { analyserMessageIA, iaActivee, IA_MAX_APPELS_PAR_VENTE } = require('./ia');
 
 // ---------- CONFIG ----------
 const PORT = process.env.PORT || 3000;
@@ -187,7 +189,8 @@ function etatInitial() {
   return {
     texteLibre: '', texteFin: TEXTE_FIN_DEFAUT, vins: [], commandes: [], commandes_attente: [], venteActive: false, groupeActifId: null,
     dateVente: new Date().toISOString(), heureDebut: null,
-    seuil50envoye: false, seuil20envoye: false, historique_edits: []
+    seuil50envoye: false, seuil20envoye: false, historique_edits: [],
+    messages_non_parses: [], iaAppels: 0
   };
 }
 
@@ -197,6 +200,8 @@ function chargerEtat() {
       const etat = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
       etat.venteActive = false;
       if (!etat.groupeActifId) etat.groupeActifId = GROUPE_ID || null;
+      etat.messages_non_parses = etat.messages_non_parses || [];
+      if (typeof etat.iaAppels !== 'number') etat.iaAppels = 0;
       return etat;
     }
     catch { return etatInitial(); }
@@ -252,22 +257,7 @@ function detecterDoublons() {
 }
 
 // ---------- PARSING ----------
-const MOTS_IGNORES = /\b(stp|svp|aub|merci|please|et|en|s'il|vous|plait|si)\b/gi;
-function parseCommandeMulti(msgBody) {
-  const txt = msgBody.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(MOTS_IGNORES, ' ').replace(/[,;\/]/g, ' ').replace(/\s+/g, ' ').trim();
-  const resultats = [];
-  const pattern = /(\d+)\s*([a-z])(?![a-z])|(?<![a-z])([a-z])\s*(\d+)/gi;
-  let match;
-  while ((match = pattern.exec(txt)) !== null) {
-    let qte, lettre;
-    if (match[1] && match[2]) { qte = parseInt(match[1]); lettre = match[2].toUpperCase(); }
-    else if (match[3] && match[4]) { qte = parseInt(match[4]); lettre = match[3].toUpperCase(); }
-    if (qte && lettre && qte > 0 && qte <= 200)
-      if (!resultats.find(r => r.lettre === lettre)) resultats.push({ lettre, qte });
-  }
-  return resultats.length > 0 ? resultats : null;
-}
+// parseCommandeMulti est extrait dans ./parsing.js (teste par test/parsing.test.js).
 
 // ---------- NUMERO REEL ----------
 // En Baileys, le JID est toujours résolu.
@@ -431,13 +421,50 @@ function programmerVenteServeur(heureISO, texteLibre, texteFin, vins) {
   return { ok: true, heureISO };
 }
 
+// ---------- ANALYSE IA D'UN MESSAGE NON PARSE (Phase 1 : observation seule) ----------
+// Appele quand le regex echoue. Non bloquant, jamais d'envoi WhatsApp.
+// Le resultat est juste enregistre dans state.messages_non_parses pour le dashboard.
+function analyserMessageNonParse(body, numeroContact, nom, estDuGroupe) {
+  if (!iaActivee()) return;
+  const texteMsg = String(body || '').trim();
+  if (!texteMsg) return;
+  if ((state.iaAppels || 0) >= IA_MAX_APPELS_PAR_VENTE) {
+    console.log('[IA] plafond de', IA_MAX_APPELS_PAR_VENTE, 'appels/vente atteint, message ignore');
+    return;
+  }
+  state.iaAppels = (state.iaAppels || 0) + 1;
+  const vinsSnapshot = state.vins.map(v => ({ lettre: v.lettre, nom: v.nom, type: v.type, contenant: v.contenant }));
+  const clientOdoo = clientsOdoo[numeroContact] || {};
+
+  analyserMessageIA(texteMsg, vinsSnapshot).then(ia => {
+    const entree = {
+      heure: new Date().toLocaleTimeString('fr-BE'),
+      numero: numeroContact,
+      nom: clientOdoo.nom || nom || '',
+      odoo_client_id: clientOdoo.odoo_id || null,
+      message: texteMsg.slice(0, 500),
+      source: estDuGroupe ? 'groupe' : 'prive',
+      ia: ia || null
+    };
+    state.messages_non_parses = state.messages_non_parses || [];
+    state.messages_non_parses.push(entree);
+    if (state.messages_non_parses.length > 200) state.messages_non_parses.shift();
+    sauvegarderEtat();
+    io.emit('update', state);
+    const resume = ia
+      ? ia.intention + ' ' + (ia.lignes.map(l => l.lettre + ':' + l.qte).join(' ') || '-') + ' (conf ' + ia.confiance + ')'
+      : 'analyse indisponible';
+    console.log('[IA] non-parse "' + texteMsg.slice(0, 40) + '" -> ' + resume);
+  }).catch(e => console.log('[IA] enregistrement echoue :', e && e.message));
+}
+
 // ---------- TRAITEMENT COMMANDE ----------
 async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe) {
-  const lignesParsees = parseCommandeMulti(body);
-  if (!lignesParsees) return;
-
   const msgId = msg.key?.id || (numeroContact + '|' + body);
   if (estDejaTraite(msgId)) { console.log('Doublon ignore :', msgId.slice(0, 40)); return; }
+
+  const lignesParsees = parseCommandeMulti(body);
+  if (!lignesParsees) { analyserMessageNonParse(body, numeroContact, nom, estDuGroupe); return; }
 
   const lignesValidees = [];
   let aEteModifie = false;
@@ -730,27 +757,68 @@ app.patch('/api/commande/:index/modifier', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/commande-manuelle', requireAuth, (req, res) => {
-  const { numero, nom, lignes, odoo_client_id } = req.body;
-  if (!numero || !lignes || lignes.length === 0) return res.status(400).json({ error: 'Invalide' });
+// Ajoute une commande "manuelle" avec les memes verifications de stock que le
+// bouton du dashboard. Reutilise par /api/commande-manuelle et par la validation
+// d'un message detecte par l'IA. Retourne { ok } ou { error }.
+function ajouterCommandeManuelle({ numero, nom, lignes, odoo_client_id, msgOriginal }) {
+  if (!numero || !lignes || lignes.length === 0) return { error: 'Invalide' };
   const lignesValidees = [];
   for (const { lettre, qte } of lignes) {
-    const vin = state.vins.find(v => v.lettre === lettre.toUpperCase());
+    const vin = state.vins.find(v => v.lettre === String(lettre || '').toUpperCase());
     if (!vin) continue;
     const qteFin = Math.min(parseInt(qte) || 0, vin.stockRestant);
     if (qteFin <= 0) continue;
     vin.stockRestant -= qteFin;
-    lignesValidees.push({ lettre: lettre.toUpperCase(), qte: qteFin, odooId: vin.odooId, manuel: true });
+    lignesValidees.push({ lettre: String(lettre).toUpperCase(), qte: qteFin, odooId: vin.odooId, manuel: true });
   }
-  if (lignesValidees.length === 0) return res.status(400).json({ error: 'Aucune ligne valide' });
+  if (lignesValidees.length === 0) return { error: 'Aucune ligne valide' };
   const commande = {
     heure: new Date().toLocaleTimeString('fr-BE'),
-    numero: numero.replace(/\D/g, ''), nom: nom || '',
+    numero: String(numero).replace(/\D/g, ''), nom: nom || '',
     odoo_client_id: odoo_client_id || null,
-    lignes: lignesValidees, source: 'manuel', msgOriginal: '[Ajout manuel]', manuel: true
+    lignes: lignesValidees, source: 'manuel',
+    msgOriginal: msgOriginal || '[Ajout manuel]', manuel: true
   };
   state.commandes.push(commande);
   sauvegarderEtat(); io.emit('update', state); io.emit('nouvelle_commande', commande);
+  return { ok: true };
+}
+
+app.post('/api/commande-manuelle', requireAuth, (req, res) => {
+  const { numero, nom, lignes, odoo_client_id } = req.body;
+  const r = ajouterCommandeManuelle({ numero, nom, lignes, odoo_client_id });
+  if (r.error) return res.status(400).json(r);
+  res.json({ ok: true });
+});
+
+// ---------- MESSAGES NON PARSES (analyse IA, phase 1) ----------
+app.get('/api/messages-non-parses', requireAuth, (req, res) => res.json(state.messages_non_parses || []));
+
+app.post('/api/message-non-parse/:index/valider', requireAuth, (req, res) => {
+  const idx = parseInt(req.params.index);
+  const arr = state.messages_non_parses || [];
+  if (isNaN(idx) || idx < 0 || idx >= arr.length) return res.status(400).json({ error: 'Index invalide' });
+  const m = arr[idx];
+  const lignes = (req.body && Array.isArray(req.body.lignes) && req.body.lignes.length)
+    ? req.body.lignes
+    : ((m.ia && m.ia.lignes) || []);
+  if (!lignes.length) return res.status(400).json({ error: 'Aucune ligne a valider' });
+  const r = ajouterCommandeManuelle({
+    numero: m.numero, nom: m.nom, odoo_client_id: m.odoo_client_id,
+    lignes, msgOriginal: m.message
+  });
+  if (r.error) return res.status(400).json(r);
+  arr.splice(idx, 1);
+  sauvegarderEtat(); io.emit('update', state);
+  res.json({ ok: true });
+});
+
+app.delete('/api/message-non-parse/:index', requireAuth, (req, res) => {
+  const idx = parseInt(req.params.index);
+  const arr = state.messages_non_parses || [];
+  if (isNaN(idx) || idx < 0 || idx >= arr.length) return res.status(400).json({ error: 'Index invalide' });
+  arr.splice(idx, 1);
+  sauvegarderEtat(); io.emit('update', state);
   res.json({ ok: true });
 });
 
