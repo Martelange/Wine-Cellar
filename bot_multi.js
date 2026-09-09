@@ -400,7 +400,10 @@ function programmerVenteServeur(heureISO, texteLibre, texteFin, vins) {
       min: parseInt(vin.min) || 1, max: parseInt(vin.max) || null, odooId: vin.odooId || null
     }));
 
+    // B6 : conserver le groupe actif avant le reset (etatInitial remet groupeActifId a null)
+    const groupeAvantReset = groupeActif();
     state = etatInitial();
+    state.groupeActifId = groupeAvantReset || null;
     state.texteLibre = texteLibre || '';
     state.texteFin = (typeof texteFin === 'string') ? texteFin : TEXTE_FIN_DEFAUT;
     state.vins = vinsAvecLettres;
@@ -412,7 +415,7 @@ function programmerVenteServeur(heureISO, texteLibre, texteFin, vins) {
 
     try {
       await sock.sendMessage(groupeActif(), { text: construireMessageVente() });
-      console.log('\nVente programmee lancee : ' + vinsAvecLettres.length + ' vins');
+      console.log('\nVente programmee lancee : ' + vinsAvecLettres.length + ' vins vers ' + groupeActif());
       io.emit('vente_lancee_auto');
     } catch (e) { console.log('Erreur envoi vente programmee :', e.message); }
   }, delaiMs);
@@ -653,7 +656,10 @@ app.post('/api/nouvelle-vente', requireAuth, async (req, res) => {
     stock: parseInt(vin.stock) || 0, stockRestant: parseInt(vin.stock) || 0,
     min: parseInt(vin.min) || 1, max: parseInt(vin.max) || null, odooId: vin.odooId || null
   }));
+  // B6 : conserver le groupe actif avant le reset (etatInitial remet groupeActifId a null)
+  const groupeAvantReset = groupeActif();
   state = etatInitial();
+  state.groupeActifId = groupeAvantReset || null;
   state.texteLibre = texteLibre || '';
   state.texteFin = (typeof texteFin === 'string') ? texteFin : TEXTE_FIN_DEFAUT;
   state.vins = vinsAvecLettres;
@@ -664,7 +670,7 @@ app.post('/api/nouvelle-vente', requireAuth, async (req, res) => {
   io.emit('update', state);
   try {
     const sendResult = await sock.sendMessage(groupeActif(), { text: construireMessageVente() });
-    console.log('\nVente demarree : ' + vinsAvecLettres.length + ' vins');
+    console.log('\nVente demarree : ' + vinsAvecLettres.length + ' vins vers ' + groupeActif());
     console.log('sendMessage result key:', sendResult?.key?.id?.substring(0, 10) || 'null/undefined');
     res.json({ ok: true });
   } catch (e) {
