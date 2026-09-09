@@ -298,7 +298,7 @@
       <!-- Vue messages IA (phase 1 : observation) -->
       <div id="vue-ia" class="card" style="height:calc(100vh - 180px);overflow:auto;display:none;">
         <div class="card-title">Messages non compris par le parseur <span id="ia-count" style="color:#b794f6;"></span></div>
-        <p style="font-size:.8rem;color:#c9956a;margin-bottom:12px;">Messages reçus pendant la vente que le parseur automatique n'a pas su lire. L'IA propose une interprétation — <strong>à vérifier</strong> avant de valider. Rien n'est envoyé sur WhatsApp.</p>
+        <p style="font-size:.8rem;color:#c9956a;margin-bottom:12px;">Messages reçus pendant la vente que le parseur automatique n'a pas su lire. L'IA propose une interprétation — <strong>à vérifier</strong> avant de valider. Si tu valides, le bot réagit sur le message du client (👍 / 👇 / ❌), sans jamais écrire de message.</p>
         <div id="empty-ia" class="empty-msg">Aucun message à examiner</div>
         <table id="ia-table" style="display:none">
           <thead>
@@ -876,7 +876,7 @@ function updateMessagesIA(s) {
 
 function validerMessageIA(idx, lignes) {
   const resume = (lignes || []).map(l => l.lettre + '×' + l.qte).join(', ');
-  if(!confirm('Créer la commande ' + resume + ' ?\n\nLes règles de stock habituelles s\'appliquent. Aucun message WhatsApp n\'est envoyé.')) return;
+  if(!confirm('Valider la commande ' + resume + ' ?\n\nLe bot réagira sur le message WhatsApp du client (👍 tel quel / 👇 ajusté au stock / ❌ refusé), comme pour une commande normale.')) return;
   authFetch('/api/message-non-parse/' + idx + '/valider', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ lignes })

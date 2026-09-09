@@ -271,16 +271,26 @@ function getNumeroReel(msg) {
 }
 
 // ---------- REACTIONS ----------
-function reagirAvecDelai(msg, emoji) {
+// Reagit (emoji) sur un message identifie par sa cle Baileys, avec un petit delai
+// aleatoire pour rester naturel. Tolere une cle absente ou un sock non connecte.
+function reagirSurCle(key, emoji) {
+  if (!key || !key.remoteJid || !sock) return;
   const delai = Math.floor(Math.random() * 2000) + 1000;
   setTimeout(async () => {
     try {
-      await sock.sendMessage(msg.key.remoteJid, {
-        react: { text: emoji, key: msg.key }
-      });
+      await sock.sendMessage(key.remoteJid, { react: { text: emoji, key } });
     }
     catch (e) { console.log('Reaction echouee :', e.message); }
   }, delai);
+}
+function reagirAvecDelai(msg, emoji) { reagirSurCle(msg.key, emoji); }
+
+// Cle serialisable (JSON) suffisante pour reagir plus tard sur un message
+function cleReaction(msg) {
+  if (!msg || !msg.key) return null;
+  const k = { remoteJid: msg.key.remoteJid, id: msg.key.id, fromMe: !!msg.key.fromMe };
+  if (msg.key.participant) k.participant = msg.key.participant;
+  return k;
 }
 
 // ---------- MESSAGES WHATSAPP ----------
@@ -429,7 +439,7 @@ function programmerVenteServeur(heureISO, texteLibre, texteFin, vins) {
 // ---------- ANALYSE IA D'UN MESSAGE NON PARSE (Phase 1 : observation seule) ----------
 // Appele quand le regex echoue. Non bloquant, jamais d'envoi WhatsApp.
 // Le resultat est juste enregistre dans state.messages_non_parses pour le dashboard.
-function analyserMessageNonParse(body, numeroContact, nom, estDuGroupe) {
+function analyserMessageNonParse(msg, body, numeroContact, nom, estDuGroupe) {
   if (!iaActivee()) return;
   const texteMsg = String(body || '').trim();
   if (!texteMsg) return;
@@ -440,6 +450,7 @@ function analyserMessageNonParse(body, numeroContact, nom, estDuGroupe) {
   state.iaAppels = (state.iaAppels || 0) + 1;
   const vinsSnapshot = state.vins.map(v => ({ lettre: v.lettre, nom: v.nom, type: v.type, contenant: v.contenant }));
   const clientOdoo = clientsOdoo[numeroContact] || {};
+  const waMsgKey = cleReaction(msg);
 
   analyserMessageIA(texteMsg, vinsSnapshot).then(ia => {
     const entree = {
@@ -449,6 +460,7 @@ function analyserMessageNonParse(body, numeroContact, nom, estDuGroupe) {
       odoo_client_id: clientOdoo.odoo_id || null,
       message: texteMsg.slice(0, 500),
       source: estDuGroupe ? 'groupe' : 'prive',
+      waMsgKey,
       ia: ia || null
     };
     state.messages_non_parses = state.messages_non_parses || [];
@@ -469,7 +481,7 @@ async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe) {
   if (estDejaTraite(msgId)) { console.log('Doublon ignore :', msgId.slice(0, 40)); return; }
 
   const lignesParsees = parseCommandeMulti(body);
-  if (!lignesParsees) { analyserMessageNonParse(body, numeroContact, nom, estDuGroupe); return; }
+  if (!lignesParsees) { analyserMessageNonParse(msg, body, numeroContact, nom, estDuGroupe); return; }
 
   const lignesValidees = [];
   let aEteModifie = false;
@@ -775,11 +787,14 @@ app.patch('/api/commande/:index/modifier', requireAuth, (req, res) => {
 function ajouterCommandeManuelle({ numero, nom, lignes, odoo_client_id, msgOriginal }) {
   if (!numero || !lignes || lignes.length === 0) return { error: 'Invalide' };
   const lignesValidees = [];
+  let modifie = false;   // une ligne demandee a ete plafonnee (stock) ou ecartee
   for (const { lettre, qte } of lignes) {
     const vin = state.vins.find(v => v.lettre === String(lettre || '').toUpperCase());
-    if (!vin) continue;
-    const qteFin = Math.min(parseInt(qte) || 0, vin.stockRestant);
-    if (qteFin <= 0) continue;
+    if (!vin) { modifie = true; continue; }
+    const qteDemandee = parseInt(qte) || 0;
+    const qteFin = Math.min(qteDemandee, vin.stockRestant);
+    if (qteFin <= 0) { modifie = true; continue; }
+    if (qteFin < qteDemandee) modifie = true;
     vin.stockRestant -= qteFin;
     lignesValidees.push({ lettre: String(lettre).toUpperCase(), qte: qteFin, odooId: vin.odooId, manuel: true });
   }
@@ -793,7 +808,7 @@ function ajouterCommandeManuelle({ numero, nom, lignes, odoo_client_id, msgOrigi
   };
   state.commandes.push(commande);
   sauvegarderEtat(); io.emit('update', state); io.emit('nouvelle_commande', commande);
-  return { ok: true };
+  return { ok: true, modifie };
 }
 
 app.post('/api/commande-manuelle', requireAuth, (req, res) => {
@@ -819,7 +834,13 @@ app.post('/api/message-non-parse/:index/valider', requireAuth, (req, res) => {
     numero: m.numero, nom: m.nom, odoo_client_id: m.odoo_client_id,
     lignes, msgOriginal: m.message
   });
-  if (r.error) return res.status(400).json(r);
+  if (r.error) {
+    // rien n'a pu etre valide (stock epuise) -> croix sur le message du client
+    reagirSurCle(m.waMsgKey, '❌');
+    return res.status(400).json(r);
+  }
+  // meme signalisation que le parsing auto : pouce tel quel / doigt bas si ajuste au stock
+  reagirSurCle(m.waMsgKey, r.modifie ? '👇' : '👍');
   arr.splice(idx, 1);
   sauvegarderEtat(); io.emit('update', state);
   res.json({ ok: true });
