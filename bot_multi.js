@@ -37,6 +37,8 @@ const ODOO_API_KEY = process.env.ODOO_API_KEY || '';
 const DATA_FILE = path.join(__dirname, 'vente_en_cours.json');
 const CLIENTS_FILE = path.join(__dirname, 'clients_odoo.json');
 const STICKER_FILE = path.join(__dirname, 'sticker_soldout.webp');
+// Dossier de session WhatsApp (nom historique conserve, monte sur le volume Railway)
+const AUTH_DIR = path.join(__dirname, '.wwebjs_auth');
 const DELAI_MERCI = 20000;
 
 const TAGS_TYPE = { rouge: 'ROUGE', blanc: 'BLANC', rose: 'ROSE', orange: 'ORANGE', petillant: 'PETILLANT' };
@@ -898,6 +900,37 @@ setInterval(() => {
 
 // ---------- WHATSAPP ----------
 let sock = null;
+let resetWhatsAppEnCours = false;
+
+// Ferme la session WhatsApp courante, vide le dossier de session et relance une
+// connexion vierge (=> nouveau QR sur le dashboard). Declenche par le bouton
+// "Reconnecter WhatsApp". Refuse si une vente est active (verifie cote endpoint).
+async function reinitialiserWhatsApp() {
+  if (resetWhatsAppEnCours) return { error: 'Reinitialisation deja en cours' };
+  resetWhatsAppEnCours = true;
+  try {
+    dernierQrCode = null;
+    try {
+      await Promise.race([
+        Promise.resolve(sock?.logout?.()),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 2500)),
+      ]);
+    } catch (e) { console.log('logout WA :', e && e.message); }
+    try { sock?.end?.(new Error('reinit manuelle')); } catch (e) { console.log('end WA :', e && e.message); }
+    await new Promise(r => setTimeout(r, 1500));
+    try {
+      for (const f of fs.readdirSync(AUTH_DIR)) {
+        fs.rmSync(path.join(AUTH_DIR, f), { recursive: true, force: true });
+      }
+      console.log('Session WhatsApp effacee');
+    } catch (e) { console.log('Effacement session WA :', e && e.message); }
+    io.emit('whatsapp_disconnected');
+  } finally {
+    resetWhatsAppEnCours = false;
+  }
+  demarrerWhatsApp();
+  return { ok: true };
+}
 
 async function demarrerWhatsApp() {
   const gId = groupeActif();
@@ -905,7 +938,7 @@ async function demarrerWhatsApp() {
   else console.log('Groupe actif au demarrage :', gId);
 
   // Session persistante dans le volume Railway (réutilise le dossier wwebjs_auth existant)
-  const { state: waAuthState, saveCreds } = await useMultiFileAuthState('./.wwebjs_auth');
+  const { state: waAuthState, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
   sock = makeWASocket({
     auth: waAuthState,
@@ -940,8 +973,8 @@ async function demarrerWhatsApp() {
       io.emit('whatsapp_disconnected');
       const code = lastDisconnect?.error?.output?.statusCode;
       const deconnecteVolontairement = code === DisconnectReason.loggedOut;
-      console.log('WhatsApp deconnecte. Code :', code, '| Reconnexion :', !deconnecteVolontairement);
-      if (!deconnecteVolontairement) {
+      console.log('WhatsApp deconnecte. Code :', code, '| Reconnexion :', !deconnecteVolontairement && !resetWhatsAppEnCours);
+      if (!deconnecteVolontairement && !resetWhatsAppEnCours) {
         setTimeout(demarrerWhatsApp, 5000);
       }
     }
@@ -1120,6 +1153,17 @@ app.post('/api/groupe-actif', requireAuth, (req, res) => {
   io.emit('update', state);
   console.log('Groupe actif change vers :', groupe.label, '(' + groupeId + ')');
   res.json({ ok: true, label: groupe.label, id: groupeId });
+});
+
+// ---------- RECONNEXION WHATSAPP ----------
+app.post('/api/whatsapp/reset', requireAuth, async (req, res) => {
+  if (state.venteActive) {
+    return res.status(400).json({ error: "Vente active : stoppez-la avant de reconnecter WhatsApp." });
+  }
+  const r = await reinitialiserWhatsApp();
+  if (r.error) return res.status(409).json(r);
+  console.log('Reconnexion WhatsApp demandee depuis le dashboard');
+  res.json({ ok: true });
 });
 
 server.listen(PORT, () => {

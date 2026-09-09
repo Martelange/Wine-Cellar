@@ -219,6 +219,8 @@
         </div>
         <button onclick="syncClientsOdoo()" style="width:100%;margin-top:8px;padding:6px;border-radius:6px;border:1px solid #5c3317;background:none;color:#c9956a;cursor:pointer;font-size:.78rem;">🔄 Synchroniser clients Odoo</button>
         <div id="sync-status" style="font-size:.75rem;color:#5c3317;margin-top:4px;display:none;"></div>
+        <button onclick="reconnecterWhatsApp()" style="width:100%;margin-top:8px;padding:6px;border-radius:6px;border:1px solid #5c3317;background:none;color:#c9956a;cursor:pointer;font-size:.78rem;">🔌 Reconnecter WhatsApp (nouveau QR)</button>
+        <div id="wa-reset-status" style="font-size:.75rem;color:#5c3317;margin-top:4px;display:none;"></div>
       </div>
 
       <!-- 3. PARAMETRAGE -->
@@ -1069,6 +1071,24 @@ function afficherStatutProgrammation(heureISO) {
     if(r<=0){ clearInterval(countdownInterval); countdownInterval=null; status.textContent='⏰ Lancement en cours...'; return; }
     status.textContent='⏰ Vente à '+heure+' — dans '+Math.floor(r/60000)+'min '+Math.floor((r%60000)/1000)+'s';
   },1000);
+}
+
+function reconnecterWhatsApp() {
+  if(state && state.venteActive) { alert('⚠️ Une vente est active. Stoppez-la avant de reconnecter WhatsApp.'); return; }
+  if(!confirm('Déconnecter la session WhatsApp actuelle et en démarrer une nouvelle ?\n\nUn QR code va s\'afficher, à scanner avec le téléphone du bot. À ne pas faire pendant une vente.')) return;
+  const status = document.getElementById('wa-reset-status');
+  status.style.display = 'block';
+  status.textContent = '⏳ Réinitialisation... le QR va apparaître.';
+  authFetch('/api/whatsapp/reset', {method:'POST'}).then(r=>r.json()).then(d=>{
+    if(d.ok) {
+      status.textContent = '✅ Session effacée — scanne le QR code.';
+      document.getElementById('wa-label').textContent = 'Scan QR...';
+      document.getElementById('wa-dot').className = 'dot waiting';
+    } else {
+      status.textContent = '⚠️ ' + (d.error || 'erreur');
+    }
+    setTimeout(()=>{ status.style.display='none'; }, 8000);
+  }).catch(()=>{ status.textContent = '⚠️ Erreur réseau'; });
 }
 
 function stopperVente() { if(confirm('Stopper la vente ?')) authFetch('/api/stopper',{method:'POST'}); }
