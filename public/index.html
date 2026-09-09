@@ -246,6 +246,7 @@
         <button id="tab-commandes" onclick="switchTab('commandes')" style="flex:1;padding:8px;border-radius:8px;border:none;cursor:pointer;font-size:.85rem;font-weight:600;background:#f5c842;color:#1a0a00;">📋 Commandes</button>
         <button id="tab-consolidation" onclick="switchTab('consolidation')" style="flex:1;padding:8px;border-radius:8px;border:none;cursor:pointer;font-size:.85rem;font-weight:600;background:#2d1a0a;color:#c9956a;border:1px solid #5c3317;">📊 Consolidation</button>
         <button id="tab-attente" onclick="switchTab('attente')" style="flex:1;padding:8px;border-radius:8px;border:none;cursor:pointer;font-size:.85rem;font-weight:600;background:#2d1a0a;color:#ff9800;border:1px solid #5c3317;">⏳ En attente <span id="attente-badge"></span></button>
+        <button id="tab-ia" onclick="switchTab('ia')" style="flex:1;padding:8px;border-radius:8px;border:none;cursor:pointer;font-size:.85rem;font-weight:600;background:#2d1a0a;color:#b794f6;border:1px solid #5c3317;">🤖 Messages IA <span id="ia-badge"></span></button>
       </div>
 
       <!-- Vue commandes -->
@@ -289,6 +290,19 @@
             <tr><th>Heure</th><th>Contact</th><th>Commande</th><th>Actions</th></tr>
           </thead>
           <tbody id="attente-body"></tbody>
+        </table>
+      </div>
+
+      <!-- Vue messages IA (phase 1 : observation) -->
+      <div id="vue-ia" class="card" style="height:calc(100vh - 180px);overflow:auto;display:none;">
+        <div class="card-title">Messages non compris par le parseur <span id="ia-count" style="color:#b794f6;"></span></div>
+        <p style="font-size:.8rem;color:#c9956a;margin-bottom:12px;">Messages reçus pendant la vente que le parseur automatique n'a pas su lire. L'IA propose une interprétation — <strong>à vérifier</strong> avant de valider. Rien n'est envoyé sur WhatsApp.</p>
+        <div id="empty-ia" class="empty-msg">Aucun message à examiner</div>
+        <table id="ia-table" style="display:none">
+          <thead>
+            <tr><th>Heure</th><th>Contact</th><th>Message reçu</th><th>Lecture IA</th><th>Actions</th></tr>
+          </thead>
+          <tbody id="ia-body"></tbody>
         </table>
       </div>
 
@@ -572,6 +586,7 @@ function updateUI(s) {
 
   if(document.getElementById('vue-consolidation').style.display!=='none') updateConsolidation(s);
   if(document.getElementById('vue-attente').style.display!=='none') updateAttente(s);
+  if(document.getElementById('vue-ia').style.display!=='none') updateMessagesIA(s);
 
   // Badge onglet en attente
   const nbAttente = (s.commandes_attente || []).length;
@@ -579,6 +594,13 @@ function updateUI(s) {
   if(badge) badge.textContent = nbAttente > 0 ? '(' + nbAttente + ')' : '';
   const tabAttente = document.getElementById('tab-attente');
   if(tabAttente && nbAttente > 0) tabAttente.style.fontWeight = '800';
+
+  // Badge onglet messages IA
+  const nbIA = (s.messages_non_parses || []).length;
+  const iaBadge = document.getElementById('ia-badge');
+  if(iaBadge) iaBadge.textContent = nbIA > 0 ? '(' + nbIA + ')' : '';
+  const tabIA = document.getElementById('tab-ia');
+  if(tabIA) tabIA.style.fontWeight = nbIA > 0 ? '800' : '600';
 }
 
 function ajouterLigneCmd(c, idx, animate) {
@@ -766,6 +788,107 @@ function supprimerAttente(idx) {
     .then(r=>r.json()).then(d=>{ if(d.ok) authFetch('/api/etat').then(r=>r.json()).then(updateUI); });
 }
 
+// ── MESSAGES IA (phase 1 : observation) ───────────────────────
+function updateMessagesIA(s) {
+  const arr = s.messages_non_parses || [];
+  document.getElementById('ia-count').textContent = arr.length ? '(' + arr.length + ')' : '';
+  const empty = document.getElementById('empty-ia');
+  const table = document.getElementById('ia-table');
+  if(arr.length === 0) { empty.style.display = 'block'; table.style.display = 'none'; return; }
+  empty.style.display = 'none';
+  table.style.display = 'table';
+  const tbody = document.getElementById('ia-body');
+  tbody.innerHTML = '';
+
+  arr.map((m, i) => ({ m, i })).reverse().forEach(({ m, i }) => {
+    const ia = m.ia;
+    const tr = document.createElement('tr');
+
+    const tdHeure = document.createElement('td');
+    tdHeure.style.color = '#c9956a';
+    tdHeure.textContent = m.heure || '';
+    tr.appendChild(tdHeure);
+
+    const tdContact = document.createElement('td');
+    const strong = document.createElement('strong');
+    strong.style.fontSize = '.85rem';
+    strong.textContent = m.nom || '';
+    tdContact.appendChild(strong);
+    if(m.nom) tdContact.appendChild(document.createElement('br'));
+    const spanNum = document.createElement('span');
+    spanNum.style.cssText = 'color:#5c3317;font-size:.72rem';
+    spanNum.textContent = '+' + m.numero;
+    tdContact.appendChild(spanNum);
+    tr.appendChild(tdContact);
+
+    const tdMsg = document.createElement('td');
+    tdMsg.style.cssText = 'font-size:.82rem;color:#f5e6d0;max-width:220px;';
+    tdMsg.textContent = m.message || '';
+    tr.appendChild(tdMsg);
+
+    const tdIA = document.createElement('td');
+    tdIA.style.fontSize = '.8rem';
+    if(!ia) {
+      tdIA.innerHTML = '<span style="color:#5c3317;">analyse indisponible</span>';
+    } else {
+      const conf = Math.round((ia.confiance || 0) * 100);
+      const couleurConf = conf >= 80 ? '#66bb6a' : conf >= 50 ? '#ff9800' : '#f44336';
+      const lignesTxt = (ia.lignes || []).map(l => l.lettre + '×' + l.qte).join('  ') || '—';
+      const intBadge = document.createElement('span');
+      intBadge.style.cssText = 'display:inline-block;border-radius:4px;padding:1px 6px;font-size:.7rem;background:#1a1a3d;color:#b794f6;';
+      intBadge.textContent = ia.intention;
+      tdIA.appendChild(intBadge);
+      const l = document.createElement('div');
+      l.style.cssText = 'margin-top:3px;color:#f5e6d0;';
+      l.textContent = lignesTxt;
+      tdIA.appendChild(l);
+      const c = document.createElement('div');
+      c.style.cssText = 'font-size:.7rem;color:' + couleurConf + ';margin-top:2px;';
+      c.textContent = 'confiance ' + conf + '%';
+      tdIA.appendChild(c);
+    }
+    tr.appendChild(tdIA);
+
+    const tdAct = document.createElement('td');
+    tdAct.style.whiteSpace = 'nowrap';
+    if(ia && ia.intention === 'commande' && (ia.lignes || []).length > 0) {
+      const bValider = document.createElement('button');
+      bValider.style.cssText = 'background:#4caf50;border:none;color:white;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:.75rem;';
+      bValider.textContent = '✅ Valider';
+      bValider.title = 'Créer la commande (avec vérification de stock)';
+      bValider.onclick = () => validerMessageIA(i, ia.lignes);
+      tdAct.appendChild(bValider);
+    }
+    const bIgnorer = document.createElement('button');
+    bIgnorer.style.cssText = 'background:none;border:none;cursor:pointer;font-size:1rem;color:#f44336;margin-left:4px;';
+    bIgnorer.textContent = '🗑️';
+    bIgnorer.title = 'Ignorer ce message';
+    bIgnorer.onclick = () => ignorerMessageIA(i);
+    tdAct.appendChild(bIgnorer);
+    tr.appendChild(tdAct);
+
+    tbody.appendChild(tr);
+  });
+}
+
+function validerMessageIA(idx, lignes) {
+  const resume = (lignes || []).map(l => l.lettre + '×' + l.qte).join(', ');
+  if(!confirm('Créer la commande ' + resume + ' ?\n\nLes règles de stock habituelles s\'appliquent. Aucun message WhatsApp n\'est envoyé.')) return;
+  authFetch('/api/message-non-parse/' + idx + '/valider', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ lignes })
+  }).then(r=>r.json()).then(d=>{
+    if(d.ok) authFetch('/api/etat').then(r=>r.json()).then(updateUI);
+    else alert('Erreur : ' + (d.error || 'inconnue'));
+  });
+}
+
+function ignorerMessageIA(idx) {
+  if(!confirm('Retirer ce message de la liste ?')) return;
+  authFetch('/api/message-non-parse/' + idx, {method:'DELETE'})
+    .then(r=>r.json()).then(d=>{ if(d.ok) authFetch('/api/etat').then(r=>r.json()).then(updateUI); });
+}
+
 // ── MODIFICATION COMMANDE ─────────────────────────────────────
 let modifierIdx = null;
 
@@ -812,7 +935,7 @@ function soumettreModification() {
   });
 }
 function switchTab(tab) {
-  const tabs = ['commandes', 'consolidation', 'attente'];
+  const tabs = ['commandes', 'consolidation', 'attente', 'ia'];
   tabs.forEach(t => {
     const vue = document.getElementById('vue-' + t);
     const btn = document.getElementById('tab-' + t);
@@ -820,11 +943,12 @@ function switchTab(tab) {
     const active = t === tab;
     vue.style.display = active ? 'block' : 'none';
     btn.style.background = active ? '#f5c842' : '#2d1a0a';
-    btn.style.color = active ? '#1a0a00' : (t === 'attente' ? '#ff9800' : '#c9956a');
+    btn.style.color = active ? '#1a0a00' : (t === 'attente' ? '#ff9800' : t === 'ia' ? '#b794f6' : '#c9956a');
     btn.style.border = active ? 'none' : '1px solid #5c3317';
   });
   if (tab === 'consolidation' && state) updateConsolidation(state);
   if (tab === 'attente' && state) updateAttente(state);
+  if (tab === 'ia' && state) updateMessagesIA(state);
 }
 
 // ── CONSOLIDATION ─────────────────────────────────────────────
