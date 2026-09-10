@@ -21,24 +21,46 @@ const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || 'moncode123';
 const GROUPE_ID = process.env.GROUPE_ID || '';  // rétrocompatibilité
 
 // ---------- GROUPES CONFIGURABLES ----------
+// Test en premier : c'est le groupe par defaut tant que rien n'est explicitement
+// choisi dans le dashboard. Securite : ne jamais partir sur le groupe clients par
+// accident (ex. apres un redeploiement qui repart d'un etat neuf).
 const GROUPES_DISPONIBLES = [
-  { id: process.env.GROUPE_PRINCIPAL || '', label: 'Principal' },
   { id: process.env.GROUPE_TEST      || '', label: 'Test' },
+  { id: process.env.GROUPE_PRINCIPAL || '', label: 'Principal' },
 ].filter(g => g.id.trim() !== '');
 
+// Groupe vise quand aucune selection n'est enregistree. On prefere explicitement
+// le groupe de test ; GROUPE_ID (retrocompat) n'est plus qu'un dernier recours.
+function groupeParDefaut() {
+  return process.env.GROUPE_TEST
+      || process.env.GROUPE_PRINCIPAL
+      || GROUPE_ID
+      || (GROUPES_DISPONIBLES[0] && GROUPES_DISPONIBLES[0].id)
+      || '';
+}
 function groupeActif() {
-  return state.groupeActifId || GROUPE_ID || (GROUPES_DISPONIBLES[0] && GROUPES_DISPONIBLES[0].id) || '';
+  return state.groupeActifId || groupeParDefaut();
 }
 
 const ODOO_URL = 'https://' + (process.env.ODOO_URL || '').replace(/^https?:\/\//, '');
 const ODOO_DB = process.env.ODOO_DB || '';
 const ODOO_API_KEY = process.env.ODOO_API_KEY || '';
 
-const DATA_FILE = path.join(__dirname, 'vente_en_cours.json');
-const CLIENTS_FILE = path.join(__dirname, 'clients_odoo.json');
-const STICKER_FILE = path.join(__dirname, 'sticker_soldout.webp');
-// Dossier de session WhatsApp (nom historique conserve, monte sur le volume Railway)
-const AUTH_DIR = path.join(__dirname, '.wwebjs_auth');
+// Dossier de session WhatsApp (nom historique conserve, monte sur le volume Railway persistant)
+const AUTH_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '.wwebjs_auth');
+// Etat des ventes + caches : sous-dossier dedie du volume, pour survivre aux redeploiements.
+// (Corrige le 10/09/2026 : c'etait ecrit dans /app, efface a chaque redeploiement -> le choix
+//  de groupe etait perdu et le bot repartait sur GROUPE_ID = Principal.)
+let STATE_DIR = path.join(AUTH_DIR, 'wc_state');
+try {
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+} catch (e) {
+  console.log('STATE_DIR sur volume impossible (' + (e && e.message) + '), repli local');
+  STATE_DIR = __dirname;
+}
+const DATA_FILE = path.join(STATE_DIR, 'vente_en_cours.json');
+const CLIENTS_FILE = path.join(STATE_DIR, 'clients_odoo.json');
+const STICKER_FILE = path.join(STATE_DIR, 'sticker_soldout.webp');
 const DELAI_MERCI = 20000;
 
 const TAGS_TYPE = { rouge: 'ROUGE', blanc: 'BLANC', rose: 'ROSE', orange: 'ORANGE', petillant: 'PETILLANT' };
@@ -201,7 +223,7 @@ function chargerEtat() {
     try {
       const etat = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
       etat.venteActive = false;
-      if (!etat.groupeActifId) etat.groupeActifId = GROUPE_ID || null;
+      // ne pas forcer de groupe ici : groupeActif() vise le groupe de test par defaut
       etat.messages_non_parses = etat.messages_non_parses || [];
       if (typeof etat.iaAppels !== 'number') etat.iaAppels = 0;
       return etat;
@@ -989,6 +1011,7 @@ async function reinitialiserWhatsApp() {
     await new Promise(r => setTimeout(r, 800));
     try {
       for (const f of fs.readdirSync(AUTH_DIR)) {
+        if (f === 'wc_state') continue;   // ne pas toucher a l'etat des ventes / caches
         fs.rmSync(path.join(AUTH_DIR, f), { recursive: true, force: true });
       }
       console.log('Session WhatsApp effacee');
