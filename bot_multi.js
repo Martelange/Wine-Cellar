@@ -1139,6 +1139,9 @@ async function reinitialiserWhatsApp() {
     try {
       for (const f of fs.readdirSync(AUTH_DIR)) {
         if (f === 'wc_state') continue;   // ne pas toucher a l'etat des ventes / caches
+        // garder la table identifiant anonyme -> vrai numero (independante de la session,
+        // sert a retrouver les vrais numeros des commandes deja enregistrees)
+        if (f.startsWith('lid-mapping-')) continue;
         fs.rmSync(path.join(AUTH_DIR, f), { recursive: true, force: true });
       }
       console.log('Session WhatsApp effacee');
