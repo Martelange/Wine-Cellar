@@ -12,8 +12,14 @@ const http = require('http');
 const { Server } = require('socket.io');
 const fs = require('fs');
 const path = require('path');
-const { parseCommandeMulti } = require('./parsing');
+const { parseCommandeMulti, estMessageCorrection } = require('./parsing');
+const { validerLignes } = require('./regles');
+const { numeroDepuisJid, numeroAuteur, correspondanceLid, extraireEdition, extraireCitation } = require('./whatsapp-msg');
 const { analyserMessageIA, iaActivee, IA_MAX_APPELS_PAR_VENTE } = require('./ia');
+
+// Le serveur Railway tourne en UTC : toujours formater les heures en heure belge
+const FUSEAU = 'Europe/Brussels';
+function heureBE() { return new Date().toLocaleTimeString('fr-BE', { timeZone: FUSEAU }); }
 
 // ---------- CONFIG ----------
 const PORT = process.env.PORT || 3000;
@@ -180,7 +186,7 @@ async function creerSalesOrder(clientOdooId, nomClient, lignes, vins) {
   try {
     const orderId = await odooExecute('sale.order', 'create', [{
       partner_id: clientOdooId,
-      note: 'Commande Wine Cellar vente flash du ' + new Date().toLocaleDateString('fr-BE')
+      note: 'Commande Wine Cellar vente flash du ' + new Date().toLocaleDateString('fr-BE', { timeZone: FUSEAU })
     }]);
     for (const ligne of lignes) {
       const vin = vins.find(v => v.lettre === ligne.lettre);
@@ -248,15 +254,12 @@ function formatDuree(ms) {
 function stockTotalRestant() { return state.vins.reduce((s, v) => s + v.stockRestant, 0); }
 function stockTotalInitial() { return state.vins.reduce((s, v) => s + v.stock, 0); }
 
-function dejaCommandePar(numero, lettre) {
-  let total = 0;
-  for (const cmd of state.commandes) {
-    if (cmd.numero === numero) {
-      const ligne = cmd.lignes.find(l => l.lettre === lettre);
-      if (ligne) total += ligne.qte;
-    }
-  }
-  return total;
+// Commande de ce client liee a ce message WhatsApp (message d'origine, ou
+// message de "correction" qui l'a remplacee). -1 si aucune.
+function trouverCommandeParMsgId(numero, msgId) {
+  if (!msgId) return -1;
+  return state.commandes.findIndex(c => c.numero === numero &&
+    (c.waMsgId === msgId || (c.waMsgIdsLies || []).includes(msgId)));
 }
 
 // ---------- ANTI-DOUBLON ----------
@@ -284,12 +287,83 @@ function detecterDoublons() {
 // parseCommandeMulti est extrait dans ./parsing.js (teste par test/parsing.test.js).
 
 // ---------- NUMERO REEL ----------
-// En Baileys, le JID est toujours résolu.
-// Groupe : msg.key.participant = '32477123456@s.whatsapp.net'
-// Privé  : msg.key.remoteJid  = '32477123456@s.whatsapp.net'
-function getNumeroReel(msg) {
-  const jid = msg.key.participant || msg.key.remoteJid || '';
-  return jid.split('@')[0].split(':')[0]; // retire le domaine et le suffixe :0 éventuel
+// Baileys 7 : dans un groupe, msg.key.participant est souvent un identifiant
+// anonyme ('150379807375559@lid') et le vrai numero est dans participantAlt.
+// Table lid -> numero alimentee par les messages recus, la liste des membres
+// des groupes et la table de correspondance que Baileys persiste dans la session.
+const lidVersNumero = {};
+
+function apprendreLid(key) {
+  const paire = correspondanceLid(key);
+  if (paire) lidVersNumero[paire.lid] = paire.numero;
+}
+
+async function numeroPourLid(lid) {
+  if (!lid) return null;
+  if (lidVersNumero[lid]) return lidVersNumero[lid];
+  try {
+    const pn = await sock?.signalRepository?.lidMapping?.getPNForLID(lid + '@lid');
+    if (pn) { lidVersNumero[lid] = numeroDepuisJid(pn); return lidVersNumero[lid]; }
+  } catch (e) { console.log('Correspondance LID echouee :', e && e.message); }
+  return null;
+}
+
+async function resoudreNumero(msg) {
+  apprendreLid(msg.key);
+  const numero = numeroAuteur(msg.key, lidVersNumero);
+  const auteur = msg.key.participant || msg.key.remoteJid || '';
+  if (auteur.endsWith('@lid') && numero === numeroDepuisJid(auteur)) {
+    return (await numeroPourLid(numero)) || numero;
+  }
+  return numero;
+}
+
+// Lit les membres des groupes configures : chacun vient avec son identifiant
+// anonyme et, quand WhatsApp le fournit, son vrai numero.
+async function chargerMembresGroupes() {
+  for (const g of GROUPES_DISPONIBLES) {
+    try {
+      const meta = await sock.groupMetadata(g.id);
+      let n = 0;
+      for (const p of meta.participants || []) {
+        if (p.id?.endsWith('@lid') && p.phoneNumber) { lidVersNumero[numeroDepuisJid(p.id)] = numeroDepuisJid(p.phoneNumber); n++; }
+        else if (p.lid && p.id?.endsWith('@s.whatsapp.net')) { lidVersNumero[numeroDepuisJid(p.lid)] = numeroDepuisJid(p.id); n++; }
+      }
+      console.log('Membres groupe ' + g.label + ' : ' + (meta.participants || []).length + ' (' + n + ' numeros connus)');
+    } catch (e) { console.log('Membres groupe ' + g.label + ' illisibles :', e && e.message); }
+  }
+}
+
+// Remplace les identifiants anonymes deja enregistres (commandes, attente,
+// messages non parses) par les vrais numeros, et raccroche le client Odoo.
+async function reparerNumeros() {
+  await chargerMembresGroupes();
+  const cache = {};
+  let corriges = 0;
+  const nonResolus = new Set();
+  const listes = [state.commandes, state.commandes_attente || [], state.messages_non_parses || []];
+  for (const liste of listes) {
+    for (const c of liste) {
+      if (!c.numero) continue;
+      if (!(c.numero in cache)) cache[c.numero] = await numeroPourLid(c.numero);
+      const numero = cache[c.numero];
+      if (!numero || numero === c.numero) {
+        if (!clientsOdoo[c.numero] && c.source !== 'manuel') nonResolus.add(c.numero);
+        continue;
+      }
+      c.numero_lid = c.numero;
+      c.numero = numero;
+      const cl = clientsOdoo[numero];
+      if (cl) {
+        if (!c.odoo_client_id) c.odoo_client_id = cl.odoo_id;
+        if (cl.nom) c.nom = cl.nom;
+      }
+      corriges++;
+    }
+  }
+  if (corriges > 0) { sauvegarderEtat(); io.emit('update', state); }
+  console.log('Reparation numeros : ' + corriges + ' entree(s) corrigee(s), ' + nonResolus.size + ' numero(s) inconnu(s) d\'Odoo');
+  return { corriges, nonResolus: [...nonResolus] };
 }
 
 // ---------- REACTIONS ----------
@@ -305,7 +379,6 @@ function reagirSurCle(key, emoji) {
     catch (e) { console.log('Reaction echouee :', e.message); }
   }, delai);
 }
-function reagirAvecDelai(msg, emoji) { reagirSurCle(msg.key, emoji); }
 
 // Cle serialisable (JSON) suffisante pour reagir plus tard sur un message
 function cleReaction(msg) {
@@ -454,7 +527,7 @@ function programmerVenteServeur(heureISO, texteLibre, texteFin, vins) {
     } catch (e) { console.log('Erreur envoi vente programmee :', e.message); }
   }, delaiMs);
 
-  console.log('Vente programmee a ' + cible.toLocaleTimeString('fr-BE') + ' (dans ' + Math.round(delaiMs / 60000) + ' min)');
+  console.log('Vente programmee a ' + cible.toLocaleTimeString('fr-BE', { timeZone: FUSEAU }) + ' (dans ' + Math.round(delaiMs / 60000) + ' min)');
   return { ok: true, heureISO };
 }
 
@@ -476,7 +549,7 @@ function analyserMessageNonParse(msg, body, numeroContact, nom, estDuGroupe) {
 
   analyserMessageIA(texteMsg, vinsSnapshot).then(ia => {
     const entree = {
-      heure: new Date().toLocaleTimeString('fr-BE'),
+      heure: heureBE(),
       numero: numeroContact,
       nom: clientOdoo.nom || nom || '',
       odoo_client_id: clientOdoo.odoo_id || null,
@@ -498,40 +571,96 @@ function analyserMessageNonParse(msg, body, numeroContact, nom, estDuGroupe) {
 }
 
 // ---------- TRAITEMENT COMMANDE ----------
-async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe) {
-  const msgId = msg.key?.id || (numeroContact + '|' + body);
+const REACTION_OK = '👍', REACTION_MODIF = '👇', REACTION_REFUS = '❌';
+
+// Message "sold out" d'un vin : une seule fois par vente (une edition qui remet
+// puis reprend le stock ne doit pas le renvoyer).
+async function annoncerSoldOutVins(lignes) {
+  for (const ligne of lignes) {
+    const vin = state.vins.find(v => v.lettre === ligne.lettre);
+    if (!vin || vin.stockRestant !== 0 || vin.soldOutAnnonce) continue;
+    vin.soldOutAnnonce = true;
+    const mots = motsContenant(vin.contenant);
+    const msgSoldOut = '🔴 *' + vin.lettre + '. ' + vin.nom + ' — SOLD OUT !*\n\n' + mots.tous + ' ' + mots.qtePlur + ' ont trouvé preneur. Merci ! 🍷';
+    try { await sock.sendMessage(groupeActif(), { text: msgSoldOut }); }
+    catch (e) { console.log('Erreur sold out vin :', e.message); }
+  }
+}
+
+// Remplace une commande existante par un nouveau texte : edition du message
+// d'origine, ou "correction" envoyee en reponse. Le stock de l'ancienne version
+// est remis, puis les memes regles qu'une commande normale s'appliquent (le max
+// ne compte pas l'ancienne version). Retourne l'action pour l'historique.
+async function remplacerCommande(cmdIndex, nouveauTexte, cleReact) {
+  const ancienne = state.commandes[cmdIndex];
+  for (const ligne of ancienne.lignes) {
+    const vin = state.vins.find(v => v.lettre === ligne.lettre);
+    if (vin) vin.stockRestant += ligne.qte;
+  }
+  const lignesParsees = parseCommandeMulti(nouveauTexte);
+  if (!lignesParsees) {
+    state.commandes.splice(cmdIndex, 1);
+    reagirSurCle(cleReact, REACTION_REFUS);
+    return 'annulation';
+  }
+  const { lignesValidees, aEteModifie, aEteRefuse } =
+    validerLignes(lignesParsees, state.vins, state.commandes, ancienne.numero, cmdIndex);
+  if (lignesValidees.length === 0) {
+    state.commandes.splice(cmdIndex, 1);
+    reagirSurCle(cleReact, REACTION_REFUS);
+    return 'annulation_min';
+  }
+  for (const ligne of lignesValidees) {
+    const vin = state.vins.find(v => v.lettre === ligne.lettre);
+    if (vin) vin.stockRestant -= ligne.qte;
+  }
+  state.commandes[cmdIndex] = { ...ancienne, lignes: lignesValidees, msgOriginal: nouveauTexte, edite: true };
+  reagirSurCle(cleReact, (aEteModifie || aEteRefuse) ? REACTION_MODIF : REACTION_OK);
+  await annoncerSoldOutVins(lignesValidees);
+  return 'modification';
+}
+
+// opts.waMsgId   : id du message auquel rattacher la commande (defaut : msg.key.id)
+// opts.cleReact  : message sur lequel reagir (defaut : msg)
+// opts.ignorerCitation : ne pas traiter le message comme une reponse (edition)
+async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe, opts = {}) {
+  const waMsgId = opts.waMsgId || msg.key?.id || null;
+  const msgId = waMsgId || (numeroContact + '|' + body);
   if (estDejaTraite(msgId)) { console.log('Doublon ignore :', msgId.slice(0, 40)); return; }
+  const cle = opts.cleReact || cleReaction(msg);
 
   const lignesParsees = parseCommandeMulti(body);
   if (!lignesParsees) { analyserMessageNonParse(msg, body, numeroContact, nom, estDuGroupe); return; }
 
-  const lignesValidees = [];
-  let aEteModifie = false;
-  let aEteRefuse = false;
-
-  for (const { lettre, qte } of lignesParsees) {
-    const qteOriginale = qte;
-    const vin = state.vins.find(v => v.lettre === lettre);
-    if (!vin) continue;
-    if (vin.stockRestant <= 0) { aEteRefuse = true; continue; }
-    if (vin.min && qte < vin.min) { aEteRefuse = true; continue; }
-
-    let qteFinale = qte;
-    let modifie = false;
-    if (vin.max) {
-      const dejaCommande = dejaCommandePar(numeroContact, lettre);
-      const resteAutorise = vin.max - dejaCommande;
-      if (resteAutorise <= 0) { aEteRefuse = true; continue; }
-      if (qteFinale > resteAutorise) { qteFinale = resteAutorise; modifie = true; aEteModifie = true; }
+  // Reponse a sa propre commande : "correction" => remplacement, sinon alerte
+  const citation = opts.ignorerCitation ? null : extraireCitation(msg);
+  const idxCite = citation ? trouverCommandeParMsgId(numeroContact, citation.idCite) : -1;
+  if (idxCite >= 0 && estMessageCorrection(body)) {
+    const ancienMessage = state.commandes[idxCite].msgOriginal;
+    const action = await remplacerCommande(idxCite, body, cle);
+    if (action === 'modification' && waMsgId) {
+      const cmd = state.commandes[idxCite];
+      cmd.waMsgIdsLies = [...(cmd.waMsgIdsLies || []), waMsgId];
+      cmd.corrige_par_reponse = true;
     }
-    if (qteFinale > vin.stockRestant) { qteFinale = vin.stockRestant; aEteModifie = true; modifie = true; }
-    lignesValidees.push({ lettre, qte: qteFinale, odooId: vin.odooId, modifie: modifie || qteFinale < qteOriginale });
+    state.historique_edits = state.historique_edits || [];
+    state.historique_edits.push({
+      heure: heureBE(), numero: numeroContact, nom,
+      ancienMessage, nouveauMessage: body, action: 'correction_reponse_' + action
+    });
+    sauvegarderEtat(); io.emit('update', state);
+    console.log('[CORRECTION] ' + (nom || numeroContact) + ' -> ' + action + ' | Restant : ' + stockTotalRestant());
+    await verifierSeuils();
+    return;
   }
 
+  const { lignesValidees, aEteModifie, aEteRefuse } =
+    validerLignes(lignesParsees, state.vins, state.commandes, numeroContact);
+
   if (lignesValidees.length > 0) {
-    reagirAvecDelai(msg, (aEteModifie || aEteRefuse) ? '\ud83d\udc47' : '\ud83d\udc4d');
+    reagirSurCle(cle, (aEteModifie || aEteRefuse) ? REACTION_MODIF : REACTION_OK);
   } else {
-    reagirAvecDelai(msg, '\u274c');
+    reagirSurCle(cle, REACTION_REFUS);
     const lignesAttente = [];
     for (const { lettre, qte } of lignesParsees) {
       const vin = state.vins.find(v => v.lettre === lettre);
@@ -542,10 +671,10 @@ async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe) {
       const clientOdoo = clientsOdoo[numeroContact] || {};
       state.commandes_attente = state.commandes_attente || [];
       state.commandes_attente.push({
-        heure: new Date().toLocaleTimeString('fr-BE'), numero: numeroContact,
+        heure: heureBE(), numero: numeroContact,
         nom: clientOdoo.nom || nom, odoo_client_id: clientOdoo.odoo_id || null,
         lignes: lignesAttente, source: estDuGroupe ? 'groupe' : 'prive',
-        msgOriginal: body, en_attente: true
+        msgOriginal: body, en_attente: true, waMsgId
       });
       sauvegarderEtat();
       io.emit('update', state);
@@ -559,30 +688,28 @@ async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe) {
     if (vin) vin.stockRestant -= ligne.qte;
   }
 
-  for (const ligne of lignesValidees) {
-    const vin = state.vins.find(v => v.lettre === ligne.lettre);
-    if (vin && vin.stockRestant === 0) {
-      const mots = motsContenant(vin.contenant);
-      const msgSoldOut = '\ud83d\udd34 *' + vin.lettre + '. ' + vin.nom + ' \u2014 SOLD OUT !*\n\n' + mots.tous + ' ' + mots.qtePlur + ' ont trouv\u00e9 preneur. Merci ! \ud83c\udf77';
-      try { await sock.sendMessage(groupeActif(), { text: msgSoldOut }); }
-      catch (e) { console.log('Erreur sold out vin :', e.message); }
-    }
-  }
+  await annoncerSoldOutVins(lignesValidees);
 
   const clientOdoo = clientsOdoo[numeroContact] || {};
   const commande = {
-    heure: new Date().toLocaleTimeString('fr-BE'),
+    heure: heureBE(),
     numero: numeroContact, nom: clientOdoo.nom || nom,
     odoo_client_id: clientOdoo.odoo_id || null,
     lignes: lignesValidees, source: estDuGroupe ? 'groupe' : 'prive', msgOriginal: body,
-    waMsgId: msg.key?.id || null
+    waMsgId
   };
+  // Reponse a sa propre commande sans mot "correction" : ajoutee, mais signalee
+  if (idxCite >= 0) {
+    commande.suspect = true;
+    commande.alerte = 'Répond à sa commande de ' + state.commandes[idxCite].heure +
+      ' sans dire « correction » : doublon ou ajout ? À vérifier.';
+  }
   state.commandes.push(commande);
   sauvegarderEtat();
   io.emit('update', state);
   io.emit('nouvelle_commande', commande);
   const resume = lignesValidees.map(l => l.lettre + ':' + l.qte + (l.modifie ? '(max)' : '')).join(' | ');
-  console.log('[' + commande.heure + '] ' + (commande.nom || numeroContact) + ' -> ' + resume + ' | Restant : ' + stockTotalRestant());
+  console.log('[' + commande.heure + '] ' + (commande.nom || numeroContact) + ' -> ' + resume + ' | Restant : ' + stockTotalRestant() + (idxCite >= 0 ? ' | ALERTE reponse sans correction' : ''));
   await verifierSeuils();
 }
 
@@ -795,7 +922,7 @@ app.patch('/api/commande/:index/modifier', requireAuth, (req, res) => {
     const qteFin = Math.min(parseInt(qte), vin.stockRestant);
     if (qteFin <= 0) continue;
     vin.stockRestant -= qteFin;
-    nouvellesLignes.push({ ...anciennesLignes.find(l => l.lettre === lettre) || {}, lettre, qte: qteFin });
+    nouvellesLignes.push({ ...(anciennesLignes.find(l => l.lettre === lettre) || { manuel: true }), lettre, qte: qteFin, odooId: vin.odooId });
   }
   state.commandes[idx].lignes = nouvellesLignes;
   state.commandes[idx].modifie_manuellement = true;
@@ -822,7 +949,7 @@ function ajouterCommandeManuelle({ numero, nom, lignes, odoo_client_id, msgOrigi
   }
   if (lignesValidees.length === 0) return { error: 'Aucune ligne valide' };
   const commande = {
-    heure: new Date().toLocaleTimeString('fr-BE'),
+    heure: heureBE(),
     numero: String(numero).replace(/\D/g, ''), nom: nom || '',
     odoo_client_id: odoo_client_id || null,
     lignes: lignesValidees, source: 'manuel',
@@ -1075,6 +1202,8 @@ async function demarrerWhatsApp() {
         console.log('Sync clients Odoo...');
         clientsOdoo = await construireCacheClients();
       }
+      // membres des groupes (vrais numeros) + reparation des commandes deja enregistrees
+      reparerNumeros().catch(e => console.log('Reparation numeros :', e && e.message));
     }
 
     if (connection === 'close') {
@@ -1101,7 +1230,7 @@ async function demarrerWhatsApp() {
       if (msg.key.fromMe) continue;
 
       // Ignorer les messages édités (traités par le listener suivant)
-      if (msg.message?.protocolMessage?.type === 14) continue;
+      if (extraireEdition(msg)) continue;
 
       // Extraction du corps — couvre tous les formats Baileys 7.x
       const body = msg.message?.conversation
@@ -1124,14 +1253,14 @@ async function demarrerWhatsApp() {
 
       if (!state.venteActive) continue;
 
-      const estDuGroupe = msg.key.remoteJid === groupeActif();
-      const estMessagePrive = !msg.key.remoteJid.includes('@g.us');
-      if (!estDuGroupe && !estMessagePrive) continue;
+      // Seules les commandes du groupe actif comptent : messages prives et
+      // autres groupes ignores en silence.
+      if (msg.key.remoteJid !== groupeActif()) continue;
 
-      const numeroContact = getNumeroReel(msg);
+      const numeroContact = await resoudreNumero(msg);
       const nom = msg.pushName || clientsOdoo[numeroContact]?.nom || '';
 
-      await traiterCommande(msg, body, numeroContact, nom, estDuGroupe);
+      await traiterCommande(msg, body, numeroContact, nom, true);
 
       if (stockTotalRestant() === 0) {
         state.venteActive = false; sauvegarderEtat();
@@ -1140,96 +1269,49 @@ async function demarrerWhatsApp() {
     }
   });
 
-  // Messages édités (protocolMessage type 14)
+  // Messages édités (protocolMessage type 14, enveloppé ou non : voir extraireEdition)
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (gen !== waGeneration) return;
     if (type !== 'notify') return;
     for (const msg of messages) {
       if (msg.key.fromMe) continue;
-      if (msg.message?.protocolMessage?.type !== 14) continue;
+      const edition = extraireEdition(msg);
+      if (!edition) continue;
       if (!state.venteActive) { console.log('Edit ignore (vente inactive)'); continue; }
+      if (msg.key.remoteJid !== groupeActif()) continue;
 
-      const proto = msg.message.protocolMessage;
-      const originalKey = proto.key;
-      const newBody = proto.editedMessage?.conversation
-        || proto.editedMessage?.extendedTextMessage?.text
-        || '';
-
-      const estDuGroupe = msg.key.remoteJid === groupeActif();
-      const estMessagePrive = !msg.key.remoteJid.includes('@g.us');
-      if (!estDuGroupe && !estMessagePrive) continue;
-
-      const numeroContact = getNumeroReel(msg);
+      const { idOriginal, nouveauTexte } = edition;
+      const numeroContact = await resoudreNumero(msg);
       const nom = msg.pushName || clientsOdoo[numeroContact]?.nom || '';
+      // reagir sur le message d'origine (celui que le client voit), pas sur l'edition
+      const cleReact = { ...cleReaction(msg), id: idOriginal };
 
-      const originalMsgId = originalKey?.id || '';
-      const cmdIndex = state.commandes.findIndex(c =>
-        c.numero === numeroContact && c.waMsgId === originalMsgId
-      );
-
+      const cmdIndex = trouverCommandeParMsgId(numeroContact, idOriginal);
       const entreeHistorique = {
-        heure: new Date().toLocaleTimeString('fr-BE'),
+        heure: heureBE(),
         numero: numeroContact, nom,
         ancienMessage: cmdIndex >= 0 ? state.commandes[cmdIndex].msgOriginal : '(inconnu)',
-        nouveauMessage: newBody, action: ''
+        nouveauMessage: nouveauTexte, action: ''
       };
 
       if (cmdIndex === -1) {
-        const nouvellesLignes = parseCommandeMulti(newBody);
-        if (nouvellesLignes) {
+        if (parseCommandeMulti(nouveauTexte)) {
           entreeHistorique.action = 'nouveau_depuis_edit';
-          messagesTraites.delete(originalMsgId);
-          await traiterCommande(msg, newBody, numeroContact, nom, estDuGroupe);
+          // la version d'origine avait ete refusee (onglet attente) : la nouvelle la remplace
+          state.commandes_attente = (state.commandes_attente || []).filter(a => a.waMsgId !== idOriginal);
+          messagesTraites.delete(idOriginal);
+          await traiterCommande(msg, nouveauTexte, numeroContact, nom, true,
+            { waMsgId: idOriginal, cleReact, ignorerCitation: true });
         } else { entreeHistorique.action = 'ignore'; }
       } else {
-        const ancienneCommande = state.commandes[cmdIndex];
-        for (const ligne of ancienneCommande.lignes) {
-          const vin = state.vins.find(v => v.lettre === ligne.lettre);
-          if (vin) vin.stockRestant += ligne.qte;
-        }
-        const nouvellesLignes = parseCommandeMulti(newBody);
-        if (!nouvellesLignes) {
-          state.commandes.splice(cmdIndex, 1);
-          entreeHistorique.action = 'annulation';
-          reagirAvecDelai(msg, '\u274c');
-        } else {
-          const lignesValidees = [];
-          let aEteModifie = false, aEteRefuse = false;
-          for (const { lettre, qte } of nouvellesLignes) {
-            const qteOriginale = qte;
-            const vin = state.vins.find(v => v.lettre === lettre);
-            if (!vin) continue;
-            if (vin.stockRestant <= 0) { aEteRefuse = true; continue; }
-            if (vin.min && qte < vin.min) { aEteRefuse = true; continue; }
-            let qteFinale = qte, modifie = false;
-            if (vin.max) {
-              const dejaCommande = dejaCommandePar(numeroContact, lettre);
-              const resteAutorise = vin.max - dejaCommande;
-              if (resteAutorise <= 0) { aEteRefuse = true; continue; }
-              if (qteFinale > resteAutorise) { qteFinale = resteAutorise; modifie = true; aEteModifie = true; }
-            }
-            if (qteFinale > vin.stockRestant) { qteFinale = vin.stockRestant; aEteModifie = true; modifie = true; }
-            lignesValidees.push({ lettre, qte: qteFinale, odooId: vin.odooId, modifie: modifie || qteFinale < qteOriginale });
-          }
-          if (lignesValidees.length > 0) {
-            for (const ligne of lignesValidees) {
-              const vin = state.vins.find(v => v.lettre === ligne.lettre);
-              if (vin) vin.stockRestant -= ligne.qte;
-            }
-            state.commandes[cmdIndex] = { ...ancienneCommande, lignes: lignesValidees, msgOriginal: newBody, edite: true };
-            reagirAvecDelai(msg, (aEteModifie || aEteRefuse) ? '\ud83d\udc47' : '\ud83d\udc4d');
-            entreeHistorique.action = 'modification';
-          } else {
-            state.commandes.splice(cmdIndex, 1);
-            reagirAvecDelai(msg, '\u274c');
-            entreeHistorique.action = 'annulation_min';
-          }
-        }
+        entreeHistorique.action = await remplacerCommande(cmdIndex, nouveauTexte, cleReact);
       }
+      console.log('[EDIT] ' + (nom || numeroContact) + ' -> ' + entreeHistorique.action + ' | Restant : ' + stockTotalRestant());
 
       state.historique_edits = state.historique_edits || [];
       state.historique_edits.push(entreeHistorique);
       sauvegarderEtat(); io.emit('update', state);
+      await verifierSeuils();
 
       if (stockTotalRestant() === 0) {
         state.venteActive = false; sauvegarderEtat();
@@ -1257,6 +1339,12 @@ app.post('/api/groupe-actif', requireAuth, (req, res) => {
   io.emit('update', state);
   console.log('Groupe actif change vers :', groupe.label, '(' + groupeId + ')');
   res.json({ ok: true, label: groupe.label, id: groupeId });
+});
+
+// ---------- REPARATION DES NUMEROS (identifiants anonymes -> vrais numeros) ----------
+app.post('/api/reparer-numeros', requireAuth, async (req, res) => {
+  if (!waConnecte) return res.status(409).json({ error: 'WhatsApp non connecte' });
+  res.json({ ok: true, ...(await reparerNumeros()) });
 });
 
 // ---------- RECONNEXION WHATSAPP ----------

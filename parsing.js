@@ -27,4 +27,13 @@ function parseCommandeMulti(msgBody) {
   return resultats.length > 0 ? resultats : null;
 }
 
-module.exports = { parseCommandeMulti, MOTS_IGNORES };
+// Mots qui signalent qu'un client corrige sa commande precedente (en reponse a
+// celle-ci). Compare sans accents ni majuscules. Voir test/parsing.test.js.
+const MOTS_CORRECTION = /\b(correction|corrige[rs]?|corrigee?|rectif\w*|modif\w*|erratum|oups|finalement|plutot|remplace\w*|au lieu)\b/;
+
+function estMessageCorrection(msgBody) {
+  const txt = String(msgBody || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  return MOTS_CORRECTION.test(txt);
+}
+
+module.exports = { parseCommandeMulti, estMessageCorrection, MOTS_IGNORES, MOTS_CORRECTION };

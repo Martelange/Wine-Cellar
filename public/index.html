@@ -620,7 +620,8 @@ function ajouterLigneCmd(c, idx, animate) {
 
   const tags=[
     c.manuel?'<span class="badge badge-manuel">manuel</span>':'',
-    c.edite?'<span class="badge badge-edit">édité</span>':''
+    c.edite?'<span class="badge badge-edit">édité</span>':'',
+    c.alerte?'<br><span style="color:#ff9800;font-size:.7rem">⚠️ '+esc(c.alerte)+'</span>':''
   ].filter(Boolean).join(' ');
 
   const tr=document.createElement('tr');
@@ -902,18 +903,60 @@ function ouvrirModifierCommande(idx) {
   document.getElementById('modifier-client').textContent = (cmd.nom || '') + ' +' + cmd.numero;
   const container = document.getElementById('modifier-lignes');
   container.innerHTML = '';
-  cmd.lignes.forEach(l => {
-    const vin = state.vins ? state.vins.find(v => v.lettre === l.lettre) : null;
+  // Tous les vins de la vente (0 = pas commande) : on peut ajouter une reference
+  (state.vins || []).forEach(vin => {
+    const l = cmd.lignes.find(x => x.lettre === vin.lettre);
     const div = document.createElement('div');
     div.style.cssText = 'display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;margin-bottom:8px;';
-    div.innerHTML = `
-      <span class="badge badge-lettre">${l.lettre}</span>
-      <span style="font-size:.82rem;color:#c9956a;">${vin ? esc(vin.nom.slice(0,30)) : l.lettre}</span>
-      <input type="number" value="${l.qte}" min="0" data-lettre="${l.lettre}"
-        style="width:70px;background:#1a0a00;border:1px solid #5c3317;border-radius:6px;padding:5px;color:#f5e6d0;text-align:center;">`;
+    const badge = document.createElement('span');
+    badge.className = 'badge badge-lettre';
+    badge.textContent = vin.lettre;
+    const libelle = document.createElement('span');
+    libelle.style.cssText = 'font-size:.82rem;color:' + (l ? '#c9956a' : '#7a5a40') + ';';
+    libelle.textContent = (vin.nom || '').slice(0,30) + (vin.max ? ' (max ' + vin.max + ')' : '');
+    const input = document.createElement('input');
+    input.type = 'number'; input.min = '0';
+    input.value = l ? l.qte : 0;
+    input.dataset.lettre = vin.lettre;
+    input.style.cssText = 'width:70px;background:#1a0a00;border:1px solid #5c3317;border-radius:6px;padding:5px;color:#f5e6d0;text-align:center;';
+    input.addEventListener('input', majAlertesModifier);
+    div.append(badge, libelle, input);
     container.appendChild(div);
   });
+  const alerte = document.createElement('p');
+  alerte.id = 'modifier-alerte';
+  alerte.style.cssText = 'color:#ff9800;font-size:.78rem;margin-top:6px;';
+  container.appendChild(alerte);
+  majAlertesModifier();
   document.getElementById('modal-modifier').style.display = 'flex';
+}
+
+// Depassements du max par client (cumul avec ses autres commandes) : l'operateur
+// peut passer outre, on l'avertit seulement.
+function depassementsMaxModifier() {
+  if(modifierIdx === null || !state) return [];
+  const cmd = state.commandes[modifierIdx];
+  const res = [];
+  document.getElementById('modifier-lignes').querySelectorAll('input[data-lettre]').forEach(inp => {
+    const vin = (state.vins || []).find(v => v.lettre === inp.dataset.lettre);
+    const qte = parseInt(inp.value) || 0;
+    if(!vin || !vin.max || qte <= 0) return;
+    let autres = 0;
+    state.commandes.forEach((c, i) => {
+      if(i === modifierIdx || c.numero !== cmd.numero) return;
+      const l = c.lignes.find(x => x.lettre === vin.lettre);
+      if(l) autres += l.qte;
+    });
+    if(autres + qte > vin.max) res.push(vin.lettre + ' : ' + (autres + qte) + ' au total pour un max de ' + vin.max);
+  });
+  return res;
+}
+
+function majAlertesModifier() {
+  const el = document.getElementById('modifier-alerte');
+  if(!el) return;
+  const d = depassementsMaxModifier();
+  el.textContent = d.length ? '⚠️ Max par client dépassé — ' + d.join(' ; ') : '';
 }
 
 function fermerModalModifier() {
@@ -929,6 +972,8 @@ function soumettreModification() {
     if(qte > 0) lignes.push({ lettre: inp.dataset.lettre, qte });
   });
   if(lignes.length === 0) return alert('Au moins une ligne doit avoir une quantité > 0');
+  const depassements = depassementsMaxModifier();
+  if(depassements.length && !confirm('Max par client dépassé :\n' + depassements.join('\n') + '\n\nValider quand même ?')) return;
   authFetch('/api/commande/' + modifierIdx + '/modifier', {
     method:'PATCH', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ lignes })

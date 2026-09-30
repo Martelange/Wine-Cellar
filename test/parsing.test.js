@@ -86,3 +86,26 @@ test('[DIVERGE] "6 magnums de A" : reference au vin par mot => non parse', () =>
 test('[DIVERGE] "6 bouteilles du rouge" : reference par type => non parse', () => {
   eq('6 bouteilles du rouge', null);
 });
+
+// ---------- Messages reels de la vente de septembre 2026 ----------
+test('messages reels : editions et correction', () => {
+  eq('4A /6C/ 4D / 1E / sorry petite modif *',
+    [{ lettre: 'A', qte: 4 }, { lettre: 'C', qte: 6 }, { lettre: 'D', qte: 4 }, { lettre: 'E', qte: 1 }]);
+  eq('2D 2b 2C -1H\u{1F64F}',
+    [{ lettre: 'D', qte: 2 }, { lettre: 'B', qte: 2 }, { lettre: 'C', qte: 2 }, { lettre: 'H', qte: 1 }]);
+  eq('Correction 3b 3c 1G', [{ lettre: 'B', qte: 3 }, { lettre: 'C', qte: 3 }, { lettre: 'G', qte: 1 }]);
+});
+
+// ---------- Detection d'une "correction" (reponse a sa propre commande) ----------
+const { estMessageCorrection } = require('../parsing');
+
+test('mots de correction reconnus', () => {
+  for (const m of ['Correction 3b 3c 1G', 'corrigé : 2A', 'petite modif 3A', 'Modification 2B',
+    'rectif 4C', 'Erratum 1A', 'oups 2A', 'finalement 3B', 'plutôt 2A', 'remplace par 4A', '2A au lieu de 3A'])
+    assert.equal(estMessageCorrection(m), true, m);
+});
+
+test('messages sans mot de correction', () => {
+  for (const m of ['3b 3c', '+2A', 'et aussi 1G', 'je prends 6A stp merci', 'encore 2B svp'])
+    assert.equal(estMessageCorrection(m), false, m);
+});
