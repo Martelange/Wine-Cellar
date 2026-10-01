@@ -1220,9 +1220,25 @@ function selectionnerProduit(idx, odooId, nom, prix) {
 }
 
 async function creerSalesOrders() {
-  if(!confirm('Créer les Sales Orders dans Odoo pour tous les clients ?\n\nCette action est irréversible.')) return;
+  const btn = event.target;   // a capturer avant tout await
 
-  const btn = event.target;
+  // Apercu : qui sera rattache a une fiche existante, qui sera cree, qui est ignore
+  let ap;
+  try { ap = await authFetch('/api/odoo/apercu-orders').then(r=>r.json()); }
+  catch(e) { return alert('Aperçu impossible : '+e.message); }
+  if(!ap || ap.error) return alert('Aperçu impossible : '+((ap&&ap.error)||'inconnue'));
+  const ligne = c => '   • '+(c.nom||'(sans nom)')+' (+'+c.numero+')';
+  const nbSO = ap.total - ap.aAssocier.length;
+  let txt = 'Créer '+nbSO+' Sales Order(s) dans Odoo ?\n\n'
+    + '✅ '+ap.existants+' client(s) avec une fiche Odoo existante\n';
+  if(ap.nouveaux.length) txt += '\n🆕 '+ap.nouveaux.length+' NOUVEAU(X) client(s) : fiche Odoo créée + message WhatsApp de bienvenue\n'
+    + ap.nouveaux.map(ligne).join('\n')+'\n';
+  if(ap.aAssocier.length) txt += '\n⛔ '+ap.aAssocier.length+' client(s) NON IDENTIFIÉ(S), ignoré(s) — à ressaisir en manuel\n'
+    + ap.aAssocier.map(ligne).join('\n')+'\n';
+  txt += '\nCette action est irréversible.';
+  if(nbSO === 0) return alert(txt.replace(/\n\nCette action est irréversible\.$/,'')+'\n\nAucune Sales Order à créer.');
+  if(!confirm(txt)) return;
+
   btn.disabled=true; btn.textContent='⏳ Création en cours...';
 
   authFetch('/api/odoo/creer-orders',{method:'POST'}).then(r=>r.json()).then(d=>{
@@ -1231,11 +1247,13 @@ async function creerSalesOrders() {
 
     const ok = d.resultats.filter(r=>r.status==='ok');
     const erreurs = d.resultats.filter(r=>r.status==='erreur');
+    const ignores = d.resultats.filter(r=>r.status==='a_associer');
 
     let msg = '✅ '+ok.length+' Sales Order(s) créé(s) avec succès';
     if(erreurs.length>0) msg += '\n\n⚠️ '+erreurs.length+' erreur(s) :\n'+erreurs.map(e=>e.nom+' : '+e.message).join('\n');
+    if(ignores.length>0) msg += '\n\n⛔ '+ignores.length+' ignoré(s) (numéro non identifié) :\n'+ignores.map(e=>(e.nom||'')+' +'+e.numero).join('\n');
     alert(msg);
-  });
+  }).catch(e=>{ btn.disabled=false; btn.textContent='🔗 Créer SO Odoo'; alert('Erreur : '+e.message); });
 }
 
 // ── SÉLECTEUR DE GROUPE ──────────────────────────────────────

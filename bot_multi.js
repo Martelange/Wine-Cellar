@@ -161,19 +161,23 @@ async function odooGetClients(recherche = '') {
 
 function normaliserTel(tel) {
   if (!tel) return '';
-  return tel.replace(/\D/g, '').replace(/^0/, '32');
+  // "0032 472..." -> "32472..." ; "0472..." -> "32472..."
+  return tel.replace(/\D/g, '').replace(/^00/, '').replace(/^0/, '32');
 }
 
 async function construireCacheClients() {
   try {
     const clients = await odooGetClients();
     const cache = {};
+    let ignorees = 0;
     for (const c of clients) {
       const norm = normaliserTel(c.phone);
+      // fiche creee jadis avec un identifiant anonyme WhatsApp en guise de telephone
+      if (norm && estIdentifiantAnonyme(norm)) { ignorees++; continue; }
       if (norm) cache[norm] = { odoo_id: c.id, nom: c.name, email: c.email };
     }
     fs.writeFileSync(CLIENTS_FILE, JSON.stringify(cache, null, 2));
-    console.log('Cache clients Odoo mis a jour : ' + clients.length + ' clients');
+    console.log('Cache clients Odoo mis a jour : ' + clients.length + ' clients' + (ignorees ? ' (' + ignorees + ' fiche(s) a identifiant anonyme ignoree(s))' : ''));
     return cache;
   } catch (e) {
     if (e.message.includes('TITLE')) console.log('Odoo indisponible — cache conserve');
@@ -308,12 +312,28 @@ async function numeroPourLid(lid) {
   return null;
 }
 
+// Identifiants anonymes vus sans vrai numero associe (pour ne jamais les
+// confondre avec un telephone, ni les rattacher a une fiche Odoo).
+const lidsNonResolus = new Set();
+
+function estIdentifiantAnonyme(numero) {
+  return !!numero && (Object.prototype.hasOwnProperty.call(lidVersNumero, numero) || lidsNonResolus.has(numero));
+}
+
+// Fiche Odoo d'un numero ; jamais pour un identifiant anonyme (le cache peut
+// encore contenir d'anciennes fiches creees avec un identifiant en guise de tel).
+function clientOdooPour(numero) {
+  return estIdentifiantAnonyme(numero) ? {} : (clientsOdoo[numero] || {});
+}
+
 async function resoudreNumero(msg) {
   apprendreLid(msg.key);
   const numero = numeroAuteur(msg.key, lidVersNumero);
   const auteur = msg.key.participant || msg.key.remoteJid || '';
   if (auteur.endsWith('@lid') && numero === numeroDepuisJid(auteur)) {
-    return (await numeroPourLid(numero)) || numero;
+    const reel = await numeroPourLid(numero);
+    if (reel) return reel;
+    lidsNonResolus.add(numero);
   }
   return numero;
 }
@@ -335,35 +355,53 @@ async function chargerMembresGroupes() {
 }
 
 // Remplace les identifiants anonymes deja enregistres (commandes, attente,
-// messages non parses) par les vrais numeros, et raccroche le client Odoo.
+// messages non parses) par les vrais numeros, puis rattache chaque entree a la
+// fiche Odoo de son VRAI numero : la fiche memorisee a la reception peut etre
+// une ancienne fausse fiche (creee avec l'identifiant anonyme comme telephone).
+// Les commandes manuelles gardent la fiche choisie par l'operateur.
 async function reparerNumeros() {
   await chargerMembresGroupes();
+  // purger du cache les fiches dont le "telephone" est un identifiant anonyme
+  // (utile aussi quand Odoo est indisponible et que le cache disque est reutilise)
+  const fausses = Object.keys(clientsOdoo).filter(estIdentifiantAnonyme);
+  if (fausses.length) {
+    fausses.forEach(k => delete clientsOdoo[k]);
+    fs.writeFileSync(CLIENTS_FILE, JSON.stringify(clientsOdoo, null, 2));
+  }
   const cache = {};
-  let corriges = 0;
+  let corriges = 0, fichesCorrigees = 0;
   const nonResolus = new Set();
   const listes = [state.commandes, state.commandes_attente || [], state.messages_non_parses || []];
   for (const liste of listes) {
     for (const c of liste) {
       if (!c.numero) continue;
-      if (!(c.numero in cache)) cache[c.numero] = await numeroPourLid(c.numero);
-      const numero = cache[c.numero];
-      if (!numero || numero === c.numero) {
-        if (!clientsOdoo[c.numero] && c.source !== 'manuel') nonResolus.add(c.numero);
-        continue;
+      if (!c.numero_lid) {
+        if (!(c.numero in cache)) cache[c.numero] = await numeroPourLid(c.numero);
+        const numero = cache[c.numero];
+        if (numero && numero !== c.numero) {
+          c.numero_lid = c.numero;
+          c.numero = numero;
+          delete c.numero_anonyme;
+          corriges++;
+        } else if (c.numero_anonyme || estIdentifiantAnonyme(c.numero)) {
+          nonResolus.add(c.numero);
+        }
       }
-      c.numero_lid = c.numero;
-      c.numero = numero;
-      const cl = clientsOdoo[numero];
-      if (cl) {
-        if (!c.odoo_client_id) c.odoo_client_id = cl.odoo_id;
-        if (cl.nom) c.nom = cl.nom;
+      if (c.numero_lid && c.source !== 'manuel') {
+        const cl = clientsOdoo[c.numero];
+        const voulu = cl ? cl.odoo_id : null;
+        if ((c.odoo_client_id || null) !== voulu) {
+          c.odoo_client_id = voulu;
+          fichesCorrigees++;
+        }
+        if (cl && cl.nom) c.nom = cl.nom;
       }
-      corriges++;
     }
   }
-  if (corriges > 0) { sauvegarderEtat(); io.emit('update', state); }
-  console.log('Reparation numeros : ' + corriges + ' entree(s) corrigee(s), ' + nonResolus.size + ' numero(s) inconnu(s) d\'Odoo');
-  return { corriges, nonResolus: [...nonResolus] };
+  if (corriges > 0 || fichesCorrigees > 0) { sauvegarderEtat(); io.emit('update', state); }
+  console.log('Reparation numeros : ' + corriges + ' numero(s) corrige(s), ' + fichesCorrigees +
+    ' fiche(s) Odoo rattachee(s) au vrai numero, ' + nonResolus.size + ' identifiant(s) anonyme(s) non resolu(s)');
+  return { corriges, fichesCorrigees, nonResolus: [...nonResolus] };
 }
 
 // ---------- REACTIONS ----------
@@ -544,7 +582,7 @@ function analyserMessageNonParse(msg, body, numeroContact, nom, estDuGroupe) {
   }
   state.iaAppels = (state.iaAppels || 0) + 1;
   const vinsSnapshot = state.vins.map(v => ({ lettre: v.lettre, nom: v.nom, type: v.type, contenant: v.contenant }));
-  const clientOdoo = clientsOdoo[numeroContact] || {};
+  const clientOdoo = clientOdooPour(numeroContact);
   const waMsgKey = cleReaction(msg);
 
   analyserMessageIA(texteMsg, vinsSnapshot).then(ia => {
@@ -668,13 +706,14 @@ async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe, opts 
       lignesAttente.push({ lettre, qte, odooId: vin.odooId });
     }
     if (lignesAttente.length > 0) {
-      const clientOdoo = clientsOdoo[numeroContact] || {};
+      const clientOdoo = clientOdooPour(numeroContact);
       state.commandes_attente = state.commandes_attente || [];
       state.commandes_attente.push({
         heure: heureBE(), numero: numeroContact,
         nom: clientOdoo.nom || nom, odoo_client_id: clientOdoo.odoo_id || null,
         lignes: lignesAttente, source: estDuGroupe ? 'groupe' : 'prive',
-        msgOriginal: body, en_attente: true, waMsgId
+        msgOriginal: body, en_attente: true, waMsgId,
+        numero_anonyme: estIdentifiantAnonyme(numeroContact) || undefined
       });
       sauvegarderEtat();
       io.emit('update', state);
@@ -690,13 +729,13 @@ async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe, opts 
 
   await annoncerSoldOutVins(lignesValidees);
 
-  const clientOdoo = clientsOdoo[numeroContact] || {};
+  const clientOdoo = clientOdooPour(numeroContact);
   const commande = {
     heure: heureBE(),
     numero: numeroContact, nom: clientOdoo.nom || nom,
     odoo_client_id: clientOdoo.odoo_id || null,
     lignes: lignesValidees, source: estDuGroupe ? 'groupe' : 'prive', msgOriginal: body,
-    waMsgId
+    waMsgId, numero_anonyme: estIdentifiantAnonyme(numeroContact) || undefined
   };
   // Reponse a sa propre commande sans mot "correction" : ajoutee, mais signalee
   if (idxCite >= 0) {
@@ -760,21 +799,71 @@ app.post('/api/odoo/sync-clients', requireAuth, async (req, res) => {
   res.json({ ok: true, count: Object.keys(clientsOdoo).length });
 });
 
-app.post('/api/odoo/creer-orders', requireAuth, async (req, res) => {
-  if (state.commandes.length === 0) return res.status(400).json({ error: 'Aucune commande' });
+// Regroupe les commandes par client et determine la fiche Odoo de chacun.
+// Priorite : fiche choisie a la main (commande manuelle) > fiche du vrai numero
+// dans le cache Odoo > fiche memorisee sur la commande. Un identifiant anonyme
+// n'est jamais rattache ni cree : statut 'a_associer'.
+function preparerOrders() {
   const map = {};
   for (const cmd of state.commandes) {
-    if (!map[cmd.numero]) map[cmd.numero] = { ...cmd, lignesConsolid: {} };
+    const c = map[cmd.numero] || (map[cmd.numero] = {
+      numero: cmd.numero, nom: '', idManuel: null, idCommande: null, anonyme: false, lignesConsolid: {}
+    });
+    if (!c.nom && cmd.nom) c.nom = cmd.nom;
+    if (cmd.source === 'manuel' && cmd.odoo_client_id && !c.idManuel) c.idManuel = cmd.odoo_client_id;
+    if (cmd.odoo_client_id && !c.idCommande) c.idCommande = cmd.odoo_client_id;
+    if (cmd.numero_anonyme || estIdentifiantAnonyme(cmd.numero)) c.anonyme = true;
     for (const ligne of cmd.lignes) {
-      if (!map[cmd.numero].lignesConsolid[ligne.lettre])
-        map[cmd.numero].lignesConsolid[ligne.lettre] = { lettre: ligne.lettre, qteTotal: 0 };
-      map[cmd.numero].lignesConsolid[ligne.lettre].qteTotal += ligne.qte;
+      if (!c.lignesConsolid[ligne.lettre]) c.lignesConsolid[ligne.lettre] = { lettre: ligne.lettre, qteTotal: 0 };
+      c.lignesConsolid[ligne.lettre].qteTotal += ligne.qte;
     }
   }
+  return Object.values(map).map(c => {
+    const cache = c.anonyme ? null : clientsOdoo[c.numero];
+    const odooId = c.idManuel || (cache && cache.odoo_id) || (c.anonyme ? null : c.idCommande) || null;
+    const statut = odooId ? 'existant' : (c.anonyme ? 'a_associer' : 'nouveau');
+    return { numero: c.numero, nom: (cache && cache.nom) || c.nom, odooId, statut, lignesConsolid: c.lignesConsolid };
+  });
+}
+
+// Apercu avant creation : affiche dans la confirmation du dashboard
+app.get('/api/odoo/apercu-orders', requireAuth, (req, res) => {
+  const clients = preparerOrders();
+  const resume = c => ({ numero: c.numero, nom: c.nom || '' });
+  res.json({
+    total: clients.length,
+    existants: clients.filter(c => c.statut === 'existant').length,
+    nouveaux: clients.filter(c => c.statut === 'nouveau').map(resume),
+    aAssocier: clients.filter(c => c.statut === 'a_associer').map(resume)
+  });
+});
+
+let creationOrdersEnCours = false;   // anti double-clic
+
+app.post('/api/odoo/creer-orders', requireAuth, async (req, res) => {
+  if (state.commandes.length === 0) return res.status(400).json({ error: 'Aucune commande' });
+  if (creationOrdersEnCours) return res.status(409).json({ error: 'Creation deja en cours' });
+  creationOrdersEnCours = true;
+  try {
+    res.json({ ok: true, resultats: await creerOrdersOdoo() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  } finally {
+    creationOrdersEnCours = false;
+  }
+});
+
+async function creerOrdersOdoo() {
   const resultats = [];
-  for (const [numero, client] of Object.entries(map)) {
-    const clientOdoo = clientsOdoo[numero] || {};
-    let odooIdFinal = client.odoo_client_id || clientOdoo.odoo_id;
+  for (const client of preparerOrders()) {
+    const numero = client.numero;
+    if (client.statut === 'a_associer') {
+      resultats.push({ numero, nom: client.nom, status: 'a_associer',
+        message: 'numéro WhatsApp non identifié, rien créé : supprimer la commande et la ressaisir en manuel avec la bonne fiche' });
+      console.log('SO ignore (identifiant anonyme non resolu) pour ' + (client.nom || numero));
+      continue;
+    }
+    let odooIdFinal = client.odooId;
     if (!odooIdFinal) {
       try {
         const newPartnerId = await odooExecute('res.partner', 'create', [{
@@ -796,8 +885,8 @@ app.post('/api/odoo/creer-orders', requireAuth, async (req, res) => {
     if (orderId) { resultats.push({ numero, nom: client.nom, status: 'ok', orderId }); console.log('SO cree pour ' + client.nom + ' : SO#' + orderId); }
     else resultats.push({ numero, nom: client.nom, status: 'erreur', message: 'Erreur creation SO' });
   }
-  res.json({ ok: true, resultats });
-});
+  return resultats;
+}
 
 app.post('/api/clients', requireAuth, (req, res) => {
   const { numero, odoo_id, nom } = req.body;
@@ -1201,6 +1290,8 @@ async function demarrerWhatsApp() {
       console.log('\nBot connecte ! Numero :', numero);
       console.log('Dashboard : http://localhost:' + PORT + '\n');
       io.emit('whatsapp_ready');
+      // membres des groupes d'abord : le cache Odoo ignore les fiches a identifiant anonyme
+      await chargerMembresGroupes();
       if (ODOO_API_KEY) {
         console.log('Sync clients Odoo...');
         clientsOdoo = await construireCacheClients();
@@ -1261,7 +1352,7 @@ async function demarrerWhatsApp() {
       if (msg.key.remoteJid !== groupeActif()) continue;
 
       const numeroContact = await resoudreNumero(msg);
-      const nom = msg.pushName || clientsOdoo[numeroContact]?.nom || '';
+      const nom = msg.pushName || clientOdooPour(numeroContact).nom || '';
 
       await traiterCommande(msg, body, numeroContact, nom, true);
 
@@ -1285,7 +1376,7 @@ async function demarrerWhatsApp() {
 
       const { idOriginal, nouveauTexte } = edition;
       const numeroContact = await resoudreNumero(msg);
-      const nom = msg.pushName || clientsOdoo[numeroContact]?.nom || '';
+      const nom = msg.pushName || clientOdooPour(numeroContact).nom || '';
       // reagir sur le message d'origine (celui que le client voit), pas sur l'edition
       const cleReact = { ...cleReaction(msg), id: idOriginal };
 
