@@ -14,7 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const { parseCommandeMulti, estMessageCorrection } = require('./parsing');
 const { validerLignes } = require('./regles');
-const { numeroDepuisJid, numeroAuteur, correspondanceLid, extraireEdition, extraireCitation } = require('./whatsapp-msg');
+const { numeroDepuisJid, numeroAuteur, correspondanceLid, texteDe, extraireEdition, extraireCitation, structureMessage } = require('./whatsapp-msg');
 const { analyserMessageIA, iaActivee, IA_MAX_APPELS_PAR_VENTE } = require('./ia');
 
 // Le serveur Railway tourne en UTC : toujours formater les heures en heure belge
@@ -1351,6 +1351,10 @@ async function demarrerWhatsApp() {
       // autres groupes ignores en silence.
       if (msg.key.remoteJid !== groupeActif()) continue;
 
+      // diagnostic : message sans texte lisible (jamais le contenu, seulement la structure)
+      if (!body && !msg.message?.reactionMessage)
+        console.log('[DIAG] message sans texte : ' + JSON.stringify(structureMessage(msg.message)));
+
       const numeroContact = await resoudreNumero(msg);
       const nom = msg.pushName || clientOdooPour(numeroContact).nom || '';
 
@@ -1363,7 +1367,11 @@ async function demarrerWhatsApp() {
     }
   });
 
-  // Messages édités (protocolMessage type 14, enveloppé ou non : voir extraireEdition)
+  // Editions : deux canaux possibles, traites par la meme fonction
+  //  1. message brut (protocolMessage type 14, enveloppe ou non) dans messages.upsert
+  //  2. notification d'edition que Baileys genere lui-meme dans messages.update
+  //     (key.id = message d'origine, update.message.editedMessage.message = nouveau contenu)
+  // Une meme edition arrivant par les deux canaux n'est traitee qu'une fois.
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (gen !== waGeneration) return;
     if (type !== 'notify') return;
@@ -1371,48 +1379,74 @@ async function demarrerWhatsApp() {
       if (msg.key.fromMe) continue;
       const edition = extraireEdition(msg);
       if (!edition) continue;
-      if (!state.venteActive) { console.log('Edit ignore (vente inactive)'); continue; }
-      if (msg.key.remoteJid !== groupeActif()) continue;
-
-      const { idOriginal, nouveauTexte } = edition;
-      const numeroContact = await resoudreNumero(msg);
-      const nom = msg.pushName || clientOdooPour(numeroContact).nom || '';
-      // reagir sur le message d'origine (celui que le client voit), pas sur l'edition
-      const cleReact = { ...cleReaction(msg), id: idOriginal };
-
-      const cmdIndex = trouverCommandeParMsgId(numeroContact, idOriginal);
-      const entreeHistorique = {
-        heure: heureBE(),
-        numero: numeroContact, nom,
-        ancienMessage: cmdIndex >= 0 ? state.commandes[cmdIndex].msgOriginal : '(inconnu)',
-        nouveauMessage: nouveauTexte, action: ''
-      };
-
-      if (cmdIndex === -1) {
-        if (parseCommandeMulti(nouveauTexte)) {
-          entreeHistorique.action = 'nouveau_depuis_edit';
-          // la version d'origine avait ete refusee (onglet attente) : la nouvelle la remplace
-          state.commandes_attente = (state.commandes_attente || []).filter(a => a.waMsgId !== idOriginal);
-          messagesTraites.delete(idOriginal);
-          await traiterCommande(msg, nouveauTexte, numeroContact, nom, true,
-            { waMsgId: idOriginal, cleReact, ignorerCitation: true });
-        } else { entreeHistorique.action = 'ignore'; }
-      } else {
-        entreeHistorique.action = await remplacerCommande(cmdIndex, nouveauTexte, cleReact);
-      }
-      console.log('[EDIT] ' + (nom || numeroContact) + ' -> ' + entreeHistorique.action + ' | Restant : ' + stockTotalRestant());
-
-      state.historique_edits = state.historique_edits || [];
-      state.historique_edits.push(entreeHistorique);
-      sauvegarderEtat(); io.emit('update', state);
-      await verifierSeuils();
-
-      if (stockTotalRestant() === 0) {
-        state.venteActive = false; sauvegarderEtat();
-        io.emit('sold_out'); await sequenceSoldOut();
-      }
+      await traiterEdition(msg, edition.idOriginal, edition.nouveauTexte, 'message');
     }
   });
+
+  sock.ev.on('messages.update', async (updates) => {
+    if (gen !== waGeneration) return;
+    for (const { key, update } of updates || []) {
+      if (!key || key.fromMe || !update?.message) continue;
+      const contenu = update.message.editedMessage?.message;
+      if (!contenu) {
+        if (state.venteActive && key.remoteJid === groupeActif())
+          console.log('[DIAG] update sans edition : ' + JSON.stringify(structureMessage(update.message)));
+        continue;
+      }
+      await traiterEdition({ key }, key.id, texteDe(contenu), 'notification');
+    }
+  });
+}
+
+const editionsTraitees = new Map();   // idOriginal|texte -> horodatage (anti double canal)
+
+async function traiterEdition(msg, idOriginal, nouveauTexte, canal) {
+  if (!state.venteActive) { console.log('Edit ignore (vente inactive)'); return; }
+  if (msg.key.remoteJid !== groupeActif()) return;
+  if (!idOriginal) return;
+
+  const cleEdition = idOriginal + '|' + nouveauTexte;
+  const maintenant = Date.now();
+  for (const [k, ts] of editionsTraitees) { if (maintenant - ts > 120000) editionsTraitees.delete(k); }
+  if (editionsTraitees.has(cleEdition)) { console.log('[EDIT] deja traitee (canal ' + canal + ')'); return; }
+  editionsTraitees.set(cleEdition, maintenant);
+
+  const numeroContact = await resoudreNumero(msg);
+  const nom = msg.pushName || clientOdooPour(numeroContact).nom || '';
+  // reagir sur le message d'origine (celui que le client voit), pas sur l'edition
+  const cleReact = { ...cleReaction(msg), id: idOriginal };
+
+  const cmdIndex = trouverCommandeParMsgId(numeroContact, idOriginal);
+  const entreeHistorique = {
+    heure: heureBE(),
+    numero: numeroContact, nom,
+    ancienMessage: cmdIndex >= 0 ? state.commandes[cmdIndex].msgOriginal : '(inconnu)',
+    nouveauMessage: nouveauTexte, action: ''
+  };
+
+  if (cmdIndex === -1) {
+    if (parseCommandeMulti(nouveauTexte)) {
+      entreeHistorique.action = 'nouveau_depuis_edit';
+      // la version d'origine avait ete refusee (onglet attente) : la nouvelle la remplace
+      state.commandes_attente = (state.commandes_attente || []).filter(a => a.waMsgId !== idOriginal);
+      messagesTraites.delete(idOriginal);
+      await traiterCommande(msg, nouveauTexte, numeroContact, nom, true,
+        { waMsgId: idOriginal, cleReact, ignorerCitation: true });
+    } else { entreeHistorique.action = 'ignore'; }
+  } else {
+    entreeHistorique.action = await remplacerCommande(cmdIndex, nouveauTexte, cleReact);
+  }
+  console.log('[EDIT] (' + canal + ') ' + (nom || numeroContact) + ' -> ' + entreeHistorique.action + ' | Restant : ' + stockTotalRestant());
+
+  state.historique_edits = state.historique_edits || [];
+  state.historique_edits.push(entreeHistorique);
+  sauvegarderEtat(); io.emit('update', state);
+  await verifierSeuils();
+
+  if (stockTotalRestant() === 0) {
+    state.venteActive = false; sauvegarderEtat();
+    io.emit('sold_out'); await sequenceSoldOut();
+  }
 }
 
 

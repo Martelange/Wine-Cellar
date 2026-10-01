@@ -68,7 +68,22 @@ function extraireCitation(msg) {
   return { idCite: ctx.stanzaId, auteurCite: ctx.participant || '' };
 }
 
+// Squelette d'un message pour le diagnostic : noms des champs (et le numero
+// de type des protocolMessage), jamais les valeurs (ni texte ni numero).
+function structureMessage(m, profondeur = 0) {
+  if (!m || typeof m !== 'object') return typeof m;
+  if (profondeur > 4) return '...';
+  const out = {};
+  for (const [k, v] of Object.entries(m)) {
+    if (v == null) continue;
+    if (k === 'type' && typeof v === 'number') out[k] = v;
+    else if (typeof v === 'object' && !(v instanceof Uint8Array)) out[k] = structureMessage(v, profondeur + 1);
+    else out[k] = typeof v;
+  }
+  return out;
+}
+
 module.exports = {
   numeroDepuisJid, numeroAuteur, correspondanceLid,
-  texteDe, extraireEdition, extraireCitation
+  texteDe, extraireEdition, extraireCitation, structureMessage
 };

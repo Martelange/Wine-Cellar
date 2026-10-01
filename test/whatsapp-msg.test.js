@@ -58,3 +58,12 @@ test('citation : reponse a un message', () => {
   assert.deepEqual(extraireCitation(msg), { idCite: 'ORIG3', auteurCite: '150379807375559@lid' });
   assert.equal(extraireCitation({ key: {}, message: { conversation: '3b 3c' } }), null);
 });
+
+test('structure de diagnostic : noms de champs seulement, jamais le texte', () => {
+  const { structureMessage } = require('../whatsapp-msg');
+  const s = structureMessage({ editedMessage: { message: { protocolMessage: {
+    type: 14, key: { id: 'ORIG' }, editedMessage: { conversation: '2A 1B secret' } } } } });
+  assert.deepEqual(s, { editedMessage: { message: { protocolMessage: {
+    type: 14, key: { id: 'string' }, editedMessage: { conversation: 'string' } } } } });
+  assert.ok(!JSON.stringify(s).includes('secret'));
+});
