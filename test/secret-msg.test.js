@@ -6,7 +6,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
-const { cleDeChiffrement, chiffrerGCM, dechiffrerSecretMessage, jidSansAppareil } = require('../secret-msg');
+const { cleDeChiffrement, chiffrerGCM, dechiffrerSecretMessage, jidSansAppareil, aadPour } = require('../secret-msg');
 
 const SECRET = crypto.randomBytes(32);
 const ID = '3EB0ABCDEF123456';
@@ -16,8 +16,17 @@ const PN = '32472623827@s.whatsapp.net';
 function chiffrer(clair, { auteur, modif, usage, secret = SECRET }) {
   const iv = crypto.randomBytes(12);
   const cle = cleDeChiffrement(secret, ID, auteur, modif, usage);
-  return { encPayload: chiffrerGCM(Buffer.from(clair), cle, iv, Buffer.from(ID + '\u0000' + modif)), encIv: iv };
+  return { encPayload: chiffrerGCM(Buffer.from(clair), cle, iv, aadPour(usage, ID, modif)), encIv: iv };
 }
+
+test('edition : AAD vide (whatsmeow) ; chiffre avec une AAD "sondage", ca ne passe pas', () => {
+  assert.equal(aadPour('Message Edit', ID, PN).length, 0);
+  assert.ok(aadPour('Poll Vote', ID, PN).length > 0);
+  const iv = crypto.randomBytes(12);
+  const cle = cleDeChiffrement(SECRET, ID, PN, PN, 'Message Edit');
+  const avecAad = { encPayload: chiffrerGCM(Buffer.from('2A'), cle, iv, Buffer.from(ID + '\u0000' + PN)), encIv: iv };
+  assert.equal(dechiffrerSecretMessage(avecAad, { secret: SECRET, msgId: ID, auteurs: [PN], modificateurs: [PN] }), null);
+});
 
 test('schema identique a decryptPollVote de Baileys (meme cle derivee)', () => {
   // Recalcul independant de la formule Baileys : hmac(secret, cle=0^32) puis hmac(sign, cle=key0)
