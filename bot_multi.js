@@ -5,7 +5,7 @@
 
 require('dotenv').config();
 
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, fetchLatestBaileysVersion, proto } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const express = require('express');
 const http = require('http');
@@ -14,7 +14,8 @@ const fs = require('fs');
 const path = require('path');
 const { parseCommandeMulti, estMessageCorrection } = require('./parsing');
 const { validerLignes } = require('./regles');
-const { numeroDepuisJid, numeroAuteur, correspondanceLid, texteDe, extraireEdition, extraireCitation, structureMessage, analyserTrameChiffree } = require('./whatsapp-msg');
+const { numeroDepuisJid, numeroAuteur, correspondanceLid, texteDe, extraireEdition, extraireCitation, structureMessage } = require('./whatsapp-msg');
+const { dechiffrerSecretMessage } = require('./secret-msg');
 const { analyserMessageIA, iaActivee, IA_MAX_APPELS_PAR_VENTE } = require('./ia');
 
 // Le serveur Railway tourne en UTC : toujours formater les heures en heure belge
@@ -714,7 +715,7 @@ async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe, opts 
         heure: heureBE(), numero: numeroContact,
         nom: clientOdoo.nom || nom, odoo_client_id: clientOdoo.odoo_id || null,
         lignes: lignesAttente, source: estDuGroupe ? 'groupe' : 'prive',
-        msgOriginal: body, en_attente: true, waMsgId,
+        msgOriginal: body, en_attente: true, waMsgId, ...secretPourEnregistrement(waMsgId),
         numero_anonyme: estIdentifiantAnonyme(numeroContact) || undefined
       });
       sauvegarderEtat();
@@ -737,7 +738,8 @@ async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe, opts 
     numero: numeroContact, nom: clientOdoo.nom || nom,
     odoo_client_id: clientOdoo.odoo_id || null,
     lignes: lignesValidees, source: estDuGroupe ? 'groupe' : 'prive', msgOriginal: body,
-    waMsgId, numero_anonyme: estIdentifiantAnonyme(numeroContact) || undefined
+    waMsgId, numero_anonyme: estIdentifiantAnonyme(numeroContact) || undefined,
+    ...secretPourEnregistrement(waMsgId)
   };
   // Reponse a sa propre commande sans mot "correction" : ajoutee, mais signalee
   if (idxCite >= 0) {
@@ -1274,15 +1276,6 @@ async function demarrerWhatsApp() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  // Trames brutes, en LECTURE SEULE : les messages chiffres "msmsg" (dont les
-  // editions en groupe) sont jetes par Baileys avant tout evenement. On les
-  // repere ici pour au moins signaler l'edition dans le dashboard.
-  if (sock.ws?.on) sock.ws.on('CB:message', node => {
-    if (gen !== waGeneration) return;
-    try { signalerTrameChiffree(node); }
-    catch (e) { console.log('Trame chiffree :', e && e.message); }
-  });
-
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
     if (gen !== waGeneration) return;   // event d'une socket obsolete
     if (qr) {
@@ -1362,6 +1355,14 @@ async function demarrerWhatsApp() {
       // autres groupes ignores en silence.
       if (msg.key.remoteJid !== groupeActif()) continue;
 
+      memoriserSecret(msg);
+
+      // Edition chiffree (secretEncryptedMessage) : dechiffree avec la cle du message d'origine
+      if (msg.message?.secretEncryptedMessage) {
+        await traiterEditionChiffree(msg, msg.message.secretEncryptedMessage);
+        continue;
+      }
+
       // diagnostic : message sans texte lisible (jamais le contenu, seulement la structure)
       if (!body && !msg.message?.reactionMessage)
         console.log('[DIAG] message sans texte : ' + JSON.stringify(structureMessage(msg.message)));
@@ -1409,49 +1410,121 @@ async function demarrerWhatsApp() {
   });
 }
 
-// Edition illisible (msmsg) : on ne connait ni le message vise ni le nouveau
-// texte, seulement l'auteur et l'heure. Ses commandes sont marquees a verifier ;
-// s'il n'en a aucune, un signalement apparait dans l'onglet des messages non parses.
-const tramesChiffreesVues = new Map();   // id de trame -> horodatage (WhatsApp peut renvoyer)
+// ---------- EDITIONS CHIFFREES (secretEncryptedMessage) ----------
+// WhatsApp chiffre les editions en groupe avec la cle propre au message
+// d'origine (messageContextInfo.messageSecret). On garde donc la cle de chaque
+// message recu dans le groupe actif pendant la vente (en memoire, et copiee sur
+// la commande pour survivre a un redemarrage). Dechiffrement : secret-msg.js.
+const secretsMessages = new Map();   // id du message -> { secret: Buffer, auteurs: [jid] }
+const SECRET_TYPE_EDITION = 2;       // proto SecretEncType.MESSAGE_EDIT
+const editionsChiffreesVues = new Set();
 
-function signalerTrameChiffree(node) {
-  if (!state.venteActive) return;
-  const t = analyserTrameChiffree(node);
-  if (!t || t.groupe !== groupeActif()) return;
-  const maintenant = Date.now();
-  for (const [k, ts] of tramesChiffreesVues) { if (maintenant - ts > 600000) tramesChiffreesVues.delete(k); }
-  if (t.id && tramesChiffreesVues.has(t.id)) return;
-  if (t.id) tramesChiffreesVues.set(t.id, maintenant);
+function memoriserSecret(msg) {
+  const secret = msg.message?.messageContextInfo?.messageSecret;
+  if (!secret || !msg.key?.id) return;
+  secretsMessages.set(msg.key.id, {
+    secret: Buffer.from(secret),
+    auteurs: [msg.key.participant, msg.key.participantAlt].filter(Boolean)
+  });
+  if (secretsMessages.size > 3000) secretsMessages.delete(secretsMessages.keys().next().value);
+}
 
-  apprendreLid(t.key);
-  const numero = numeroAuteur(t.key, lidVersNumero);
-  const nom = clientOdooPour(numero).nom || '';
-  const qui = nom || ('+' + numero.slice(0, 5) + '…');
-  console.log('[MSMSG] trame chiffree ignoree par Baileys : type=' + t.type + ' edit=' + (t.edit || '-') +
-    ' enc=' + t.encTypes.join(',') + ' de ' + qui);
-  if (!t.estEdition) return;
+// Cle a recopier sur une commande / une attente (base64, serialisable)
+function secretPourEnregistrement(id) {
+  const info = id && secretsMessages.get(id);
+  return info ? { waSecret: info.secret.toString('base64'), waAuteurs: info.auteurs } : {};
+}
 
-  const heure = heureBE();
-  const alerte = 'Le client a modifié un message à ' + heure +
-    ' : modification illisible pour le bot, vérifier dans WhatsApp et corriger avec ✏️.';
-  const sesCommandes = state.commandes.filter(c => c.numero === numero);
-  if (sesCommandes.length) {
-    for (const c of sesCommandes) {
-      c.suspect = true;
-      c.alerte = c.alerte ? c.alerte + ' / ' + alerte : alerte;
+function secretDuMessage(id) {
+  if (!id) return null;
+  if (secretsMessages.has(id)) return secretsMessages.get(id);
+  const c = state.commandes.find(x => x.waSecret && (x.waMsgId === id || (x.waMsgIdsLies || []).includes(id)))
+    || (state.commandes_attente || []).find(x => x.waSecret && x.waMsgId === id);
+  return c ? { secret: Buffer.from(c.waSecret, 'base64'), auteurs: c.waAuteurs || [] } : null;
+}
+
+// Toutes les formes connues d'un JID (identifiant anonyme et vrai numero)
+function formesJid(jid) {
+  const formes = [jid];
+  const user = numeroDepuisJid(jid);
+  if (!user) return formes;
+  if (String(jid).endsWith('@lid') && lidVersNumero[user]) formes.push(lidVersNumero[user] + '@s.whatsapp.net');
+  if (String(jid).endsWith('@s.whatsapp.net')) {
+    const lid = Object.keys(lidVersNumero).find(k => lidVersNumero[k] === user);
+    if (lid) formes.push(lid + '@lid');
+  }
+  return formes;
+}
+
+function texteDuContenuEdite(contenu) {
+  return texteDe(contenu)
+    || extraireEdition({ message: contenu })?.nouveauTexte
+    || texteDe(contenu?.editedMessage?.message)
+    || null;
+}
+
+async function traiterEditionChiffree(msg, se) {
+  if (msg.key?.id) {
+    if (editionsChiffreesVues.has(msg.key.id)) return;   // renvoi WhatsApp
+    editionsChiffreesVues.add(msg.key.id);
+    if (editionsChiffreesVues.size > 3000) editionsChiffreesVues.delete(editionsChiffreesVues.values().next().value);
+  }
+  const cible = se.targetMessageKey || {};
+  const idCible = cible.id || '';
+  if (se.secretEncType !== SECRET_TYPE_EDITION) {
+    console.log('[EDIT] message chiffre de type ' + se.secretEncType + ' ignore');
+    return;
+  }
+  const numero = await resoudreNumero(msg);
+  const info = secretDuMessage(idCible);
+  let texte = null, raison = '';
+  if (!info) {
+    raison = 'cle du message d\'origine inconnue';
+  } else {
+    const auteurs = [...info.auteurs, cible.participant].filter(Boolean).flatMap(formesJid);
+    const modificateurs = [msg.key.participant, msg.key.participantAlt].filter(Boolean).flatMap(formesJid);
+    const r = dechiffrerSecretMessage(se, { secret: info.secret, msgId: idCible, auteurs, modificateurs });
+    if (!r) {
+      raison = 'dechiffrement impossible (aucune combinaison validee)';
+    } else {
+      let contenu = null;
+      try { contenu = proto.Message.decode(r.octets); } catch (e) { raison = 'contenu dechiffre non decodable'; }
+      if (contenu) {
+        texte = texteDuContenuEdite(contenu);
+        if (texte === null) raison = 'contenu sans texte : ' + JSON.stringify(structureMessage(contenu));
+      }
+      console.log('[EDIT] dechiffre (' + r.variante + ')' + (texte === null ? ' mais ' + raison : ''));
     }
+  }
+  if (texte === null) { signalerEditionIllisible(numero, idCible, raison); return; }
+  await traiterEdition(msg, idCible, texte, 'chiffre');
+}
+
+// Edition impossible a lire : la commande visee (ou, a defaut, un signalement
+// dans l'onglet des messages non parses) est marquee a verifier.
+function signalerEditionIllisible(numero, idCible, raison) {
+  const heure = heureBE();
+  const nom = clientOdooPour(numero).nom || '';
+  const qui = nom || ('+' + String(numero).slice(0, 5) + '…');
+  const alerte = 'Le client a modifié son message à ' + heure +
+    ' mais le bot n\'a pas pu lire la modification : vérifier dans WhatsApp et corriger avec ✏️.';
+  const idx = trouverCommandeParMsgId(numero, idCible);
+  if (idx >= 0) {
+    const c = state.commandes[idx];
+    c.suspect = true;
+    c.alerte = c.alerte ? c.alerte + ' / ' + alerte : alerte;
   } else {
     state.messages_non_parses = state.messages_non_parses || [];
     state.messages_non_parses.push({
       heure, numero, nom, odoo_client_id: clientOdooPour(numero).odoo_id || null,
-      message: '[Message modifié par le client, contenu illisible pour le bot — vérifier dans WhatsApp]',
+      message: '[Message modifié par le client, modification illisible pour le bot — vérifier dans WhatsApp]',
       source: 'groupe', waMsgKey: null, ia: null
     });
   }
   state.historique_edits = state.historique_edits || [];
-  state.historique_edits.push({ heure, numero, nom, ancienMessage: '(inconnu)', nouveauMessage: '(illisible)', action: 'edition_illisible' });
+  state.historique_edits.push({ heure, numero, nom, ancienMessage: '(inconnu)', nouveauMessage: '(illisible)', action: 'edition_illisible', raison });
   sauvegarderEtat(); io.emit('update', state);
-  console.log('[EDIT] illisible de ' + qui + ' -> ' + (sesCommandes.length ? sesCommandes.length + ' commande(s) marquee(s) a verifier' : 'signale (aucune commande)'));
+  console.log('[EDIT] illisible de ' + qui + ' (' + raison + ') -> ' + (idx >= 0 ? 'commande marquee a verifier' : 'signale (commande introuvable)'));
 }
 
 const editionsTraitees = new Map();   // idOriginal|texte -> horodatage (anti double canal)
