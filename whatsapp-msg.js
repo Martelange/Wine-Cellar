@@ -68,6 +68,26 @@ function extraireCitation(msg) {
   return { idCite: ctx.stanzaId, auteurCite: ctx.participant || '' };
 }
 
+// Trame brute recue de WhatsApp (avant Baileys) chiffree "msmsg" : Baileys la
+// jette sans la transmettre (messages-recv.js, "ignored msmsg"). C'est le cas
+// des editions de message en groupe. Retourne null si ce n'est pas une trame
+// msmsg, sinon { groupe, id, type, edit, estEdition, encTypes, key } ou key
+// imite une cle Baileys (participant / participantAlt) pour retrouver le numero.
+// Attribut edit : "1" = edition du message (protocole WhatsApp).
+function analyserTrameChiffree(node) {
+  const a = node?.attrs || {};
+  const encs = (Array.isArray(node?.content) ? node.content : []).filter(c => c && c.tag === 'enc');
+  if (!encs.some(c => c.attrs?.type === 'msmsg')) return null;
+  const alt = a.participant_pn || a.sender_pn || a.participant_lid || a.sender_lid;
+  return {
+    groupe: a.from || '', id: a.id || '', type: a.type || '', edit: a.edit || '',
+    // edit absent : on considere un texte chiffre comme une edition probable
+    estEdition: a.edit === '1' || (!a.edit && a.type === 'text'),
+    encTypes: encs.map(c => c.attrs?.type || '?'),
+    key: { remoteJid: a.from || '', participant: a.participant || '', ...(alt ? { participantAlt: alt } : {}) }
+  };
+}
+
 // Squelette d'un message pour le diagnostic : noms des champs (et le numero
 // de type des protocolMessage), jamais les valeurs (ni texte ni numero).
 function structureMessage(m, profondeur = 0) {
@@ -85,5 +105,5 @@ function structureMessage(m, profondeur = 0) {
 
 module.exports = {
   numeroDepuisJid, numeroAuteur, correspondanceLid,
-  texteDe, extraireEdition, extraireCitation, structureMessage
+  texteDe, extraireEdition, extraireCitation, structureMessage, analyserTrameChiffree
 };

@@ -67,3 +67,17 @@ test('structure de diagnostic : noms de champs seulement, jamais le texte', () =
     type: 14, key: { id: 'string' }, editedMessage: { conversation: 'string' } } } } });
   assert.ok(!JSON.stringify(s).includes('secret'));
 });
+
+test('trame brute chiffree msmsg : edition reperee, numero retrouvable', () => {
+  const { analyserTrameChiffree, numeroAuteur } = require('../whatsapp-msg');
+  const node = { tag: 'message', attrs: { from: '120363000000000001@g.us', id: 'T1', type: 'text', edit: '1',
+    participant: '150379807375559@lid', participant_pn: '32472623827@s.whatsapp.net' },
+    content: [{ tag: 'enc', attrs: { type: 'msmsg', v: '2' }, content: new Uint8Array(4) }] };
+  const t = analyserTrameChiffree(node);
+  assert.equal(t.estEdition, true);
+  assert.deepEqual(t.encTypes, ['msmsg']);
+  assert.equal(numeroAuteur(t.key), '32472623827');
+  // message normal (skmsg) : ignore ; msmsg sans edit mais type poll : pas une edition
+  assert.equal(analyserTrameChiffree({ attrs: {}, content: [{ tag: 'enc', attrs: { type: 'skmsg' } }] }), null);
+  assert.equal(analyserTrameChiffree({ attrs: { type: 'poll' }, content: [{ tag: 'enc', attrs: { type: 'msmsg' } }] }).estEdition, false);
+});

@@ -14,7 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const { parseCommandeMulti, estMessageCorrection } = require('./parsing');
 const { validerLignes } = require('./regles');
-const { numeroDepuisJid, numeroAuteur, correspondanceLid, texteDe, extraireEdition, extraireCitation, structureMessage } = require('./whatsapp-msg');
+const { numeroDepuisJid, numeroAuteur, correspondanceLid, texteDe, extraireEdition, extraireCitation, structureMessage, analyserTrameChiffree } = require('./whatsapp-msg');
 const { analyserMessageIA, iaActivee, IA_MAX_APPELS_PAR_VENTE } = require('./ia');
 
 // Le serveur Railway tourne en UTC : toujours formater les heures en heure belge
@@ -87,6 +87,8 @@ const TEXTE_FIN_DEFAUT =
   '\ud83d\udcdd *Comment commander ?*\n' +
   '   *Quantite + Lettre* pour chaque vin souhaite\n' +
   '   Ex: *3A* \u2014 *6B* \u2014 *2A 3B* \u2014 *6A 3B 2C*\n\n' +
+  '\u270f\ufe0f *Pour corriger* : repondez a votre commande avec *correction* + la commande complete\n' +
+  '   Ex: *correction 3A 2B* (ne modifiez pas le message, le bot ne voit pas les modifications)\n\n' +
   '\ud83d\udc4d All good \u2014 commande validee telle quelle\n' +
   '\ud83d\udc47 Commande modifiee (regles ou fin de stock)\n' +
   '\u274c Commande refusee\n' +
@@ -1272,6 +1274,15 @@ async function demarrerWhatsApp() {
 
   sock.ev.on('creds.update', saveCreds);
 
+  // Trames brutes, en LECTURE SEULE : les messages chiffres "msmsg" (dont les
+  // editions en groupe) sont jetes par Baileys avant tout evenement. On les
+  // repere ici pour au moins signaler l'edition dans le dashboard.
+  if (sock.ws?.on) sock.ws.on('CB:message', node => {
+    if (gen !== waGeneration) return;
+    try { signalerTrameChiffree(node); }
+    catch (e) { console.log('Trame chiffree :', e && e.message); }
+  });
+
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
     if (gen !== waGeneration) return;   // event d'une socket obsolete
     if (qr) {
@@ -1396,6 +1407,51 @@ async function demarrerWhatsApp() {
       await traiterEdition({ key }, key.id, texteDe(contenu), 'notification');
     }
   });
+}
+
+// Edition illisible (msmsg) : on ne connait ni le message vise ni le nouveau
+// texte, seulement l'auteur et l'heure. Ses commandes sont marquees a verifier ;
+// s'il n'en a aucune, un signalement apparait dans l'onglet des messages non parses.
+const tramesChiffreesVues = new Map();   // id de trame -> horodatage (WhatsApp peut renvoyer)
+
+function signalerTrameChiffree(node) {
+  if (!state.venteActive) return;
+  const t = analyserTrameChiffree(node);
+  if (!t || t.groupe !== groupeActif()) return;
+  const maintenant = Date.now();
+  for (const [k, ts] of tramesChiffreesVues) { if (maintenant - ts > 600000) tramesChiffreesVues.delete(k); }
+  if (t.id && tramesChiffreesVues.has(t.id)) return;
+  if (t.id) tramesChiffreesVues.set(t.id, maintenant);
+
+  apprendreLid(t.key);
+  const numero = numeroAuteur(t.key, lidVersNumero);
+  const nom = clientOdooPour(numero).nom || '';
+  const qui = nom || ('+' + numero.slice(0, 5) + '…');
+  console.log('[MSMSG] trame chiffree ignoree par Baileys : type=' + t.type + ' edit=' + (t.edit || '-') +
+    ' enc=' + t.encTypes.join(',') + ' de ' + qui);
+  if (!t.estEdition) return;
+
+  const heure = heureBE();
+  const alerte = 'Le client a modifié un message à ' + heure +
+    ' : modification illisible pour le bot, vérifier dans WhatsApp et corriger avec ✏️.';
+  const sesCommandes = state.commandes.filter(c => c.numero === numero);
+  if (sesCommandes.length) {
+    for (const c of sesCommandes) {
+      c.suspect = true;
+      c.alerte = c.alerte ? c.alerte + ' / ' + alerte : alerte;
+    }
+  } else {
+    state.messages_non_parses = state.messages_non_parses || [];
+    state.messages_non_parses.push({
+      heure, numero, nom, odoo_client_id: clientOdooPour(numero).odoo_id || null,
+      message: '[Message modifié par le client, contenu illisible pour le bot — vérifier dans WhatsApp]',
+      source: 'groupe', waMsgKey: null, ia: null
+    });
+  }
+  state.historique_edits = state.historique_edits || [];
+  state.historique_edits.push({ heure, numero, nom, ancienMessage: '(inconnu)', nouveauMessage: '(illisible)', action: 'edition_illisible' });
+  sauvegarderEtat(); io.emit('update', state);
+  console.log('[EDIT] illisible de ' + qui + ' -> ' + (sesCommandes.length ? sesCommandes.length + ' commande(s) marquee(s) a verifier' : 'signale (aucune commande)'));
 }
 
 const editionsTraitees = new Map();   // idOriginal|texte -> horodatage (anti double canal)
