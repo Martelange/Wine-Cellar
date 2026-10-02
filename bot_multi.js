@@ -17,6 +17,7 @@ const { validerLignes } = require('./regles');
 const { numeroDepuisJid, numeroAuteur, correspondanceLid, texteDe, extraireEdition, extraireCitation, structureMessage } = require('./whatsapp-msg');
 const { dechiffrerSecretMessage } = require('./secret-msg');
 const { analyserMessageIA, iaActivee, IA_MAX_APPELS_PAR_VENTE } = require('./ia');
+const { reglagesParDefaut, normaliserReglages, remplirModele } = require('./messages');
 
 // Le serveur Railway tourne en UTC : toujours formater les heures en heure belge
 const FUSEAU = 'Europe/Brussels';
@@ -68,6 +69,7 @@ try {
 const DATA_FILE = path.join(STATE_DIR, 'vente_en_cours.json');
 const CLIENTS_FILE = path.join(STATE_DIR, 'clients_odoo.json');
 const STICKER_FILE = path.join(STATE_DIR, 'sticker_soldout.webp');
+const REGLAGES_FILE = path.join(STATE_DIR, 'reglages.json');
 const DELAI_MERCI = 20000;
 
 const TAGS_TYPE = { rouge: 'ROUGE', blanc: 'BLANC', rose: 'ROSE', orange: 'ORANGE', petillant: 'PETILLANT' };
@@ -221,12 +223,23 @@ function chargerClients() {
 }
 let clientsOdoo = chargerClients();
 
+// ---------- REGLAGES (messages personnalisables) ----------
+// Fichier separe de l'etat de vente : il survit aux nouvelles ventes et aux redeploiements.
+function chargerReglages() {
+  if (fs.existsSync(REGLAGES_FILE)) {
+    try { return normaliserReglages(JSON.parse(fs.readFileSync(REGLAGES_FILE, 'utf8'))); }
+    catch (e) { console.log('Reglages illisibles, valeurs par defaut :', e.message); }
+  }
+  return reglagesParDefaut();
+}
+let reglages = chargerReglages();
+
 // ---------- ETAT ----------
 function etatInitial() {
   return {
     texteLibre: '', texteFin: TEXTE_FIN_DEFAUT, vins: [], commandes: [], commandes_attente: [], venteActive: false, groupeActifId: null,
     dateVente: new Date().toISOString(), heureDebut: null,
-    seuil50envoye: false, seuil20envoye: false, historique_edits: [],
+    historique_edits: [],
     messages_non_parses: [], iaAppels: 0
   };
 }
@@ -473,25 +486,9 @@ function construireMessageStocks() {
   return msg;
 }
 
-// ---------- SEUILS ----------
-async function verifierSeuils() {
-  const restant = stockTotalRestant();
-  const total = stockTotalInitial();
-  if (total === 0) return;
-  const pct = (restant / total) * 100;
-  const duree = state.heureDebut ? formatDuree(Date.now() - state.heureDebut) : '?';
-  const vendues = total - restant;
-  if (!state.seuil50envoye && pct <= 50) {
-    state.seuil50envoye = true; sauvegarderEtat();
-    const msg = '\ud83d\udfe1 *Mi-parcours !*\n\n*' + vendues + ' bouteilles* vendues en ' + duree + ' !\nIl reste encore *' + restant + ' bouteilles* disponibles.\n\nDepêchez-vous... \u23f0';
-    try { await sock.sendMessage(groupeActif(), { text: msg }); } catch (e) { console.log('Erreur 50% :', e.message); }
-  }
-  if (!state.seuil20envoye && pct <= 20) {
-    state.seuil20envoye = true; sauvegarderEtat();
-    const msg = '\ud83d\udd34 *Plus que ' + restant + ' bouteilles !*\n\nOn a ecoule *' + vendues + ' bouteilles* en ' + duree + '...\nC\'est le moment ou jamais ! \ud83c\udf77';
-    try { await sock.sendMessage(groupeActif(), { text: msg }); } catch (e) { console.log('Erreur 20% :', e.message); }
-  }
-}
+// (Messages automatiques « mi-parcours » 50 % / 20 % retires le 02/10/2026 a la demande de
+//  l'operateur : seuls l'annonce, les sold out par vin, le sticker, le message final et le
+//  message prive nouveau client sont envoyes.)
 
 // ---------- SOLD OUT ----------
 async function sequenceSoldOut() {
@@ -507,7 +504,9 @@ async function sequenceSoldOut() {
     catch (e) { await sock.sendMessage(groupeActif(), { text: '\ud83d\udd34 *SOLD OUT !*' }); }
   } else { await sock.sendMessage(groupeActif(), { text: '\ud83d\udd34 *SOLD OUT !*' }); }
   setTimeout(async () => {
-    const fin = '\ud83d\udd25 *SOLD OUT en ' + duree + '* \u26a1\n\n*Un enorme merci a tous* \ud83d\ude4f\nVous avez ete ultra rapides !\n\n\ud83d\udce6 *' + vendues + ' bouteilles* vendues\n\ud83d\udc65 *' + nbCommandes + ' commandes* enregistrees\n\nVous serez contactes prochainement. \ud83c\udf77';
+    // Texte modifiable dans les Reglages du dashboard ; vide = pas de message final
+    const fin = remplirModele(reglages.messageFin, { duree, bouteilles: vendues, commandes: nbCommandes });
+    if (!fin.trim()) { console.log('Message final vide dans les reglages : non envoye'); return; }
     try { await sock.sendMessage(groupeActif(), { text: fin }); } catch (e) { console.log('Erreur fin :', e.message); }
   }, DELAI_MERCI);
 }
@@ -691,7 +690,6 @@ async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe, opts 
     });
     sauvegarderEtat(); io.emit('update', state);
     console.log('[CORRECTION] ' + (nom || numeroContact) + ' -> ' + action + ' | Restant : ' + stockTotalRestant());
-    await verifierSeuils();
     return;
   }
 
@@ -753,7 +751,6 @@ async function traiterCommande(msg, body, numeroContact, nom, estDuGroupe, opts 
   io.emit('nouvelle_commande', commande);
   const resume = lignesValidees.map(l => l.lettre + ':' + l.qte + (l.modifie ? '(max)' : '')).join(' | ');
   console.log('[' + commande.heure + '] ' + (commande.nom || numeroContact) + ' -> ' + resume + ' | Restant : ' + stockTotalRestant() + (idxCite >= 0 ? ' | ALERTE reponse sans correction' : ''));
-  await verifierSeuils();
 }
 
 // ---------- EXPRESS ----------
@@ -877,8 +874,11 @@ async function creerOrdersOdoo() {
         clientsOdoo[numero] = { odoo_id: newPartnerId, nom: client.nom || ('WA +' + numero), email: null };
         fs.writeFileSync(CLIENTS_FILE, JSON.stringify(clientsOdoo, null, 2));
         console.log('Nouveau client cree : #' + newPartnerId);
-        const msgPrive = 'Bonjour,\n\nMerci beaucoup pour cette premi\u00e8re commande sur Wine Cellar ! \ud83c\udf77\n\nPuis-je vous demander votre adresse mail ?\nAvez-vous besoin d\'une facture ? Si oui, je veux bien les coordonn\u00e9es.\n\nMerci d\'avance\nBon week-end\n\nHugues / Wine Cellar';
-        try { await sock.sendMessage(numero + '@s.whatsapp.net', { text: msgPrive }); } catch (e) { console.log('Erreur msg prive :', e.message); }
+        // Texte modifiable dans les Reglages du dashboard ; vide = pas de message prive
+        const msgPrive = remplirModele(reglages.messageNouveauClient, { nom: client.nom || '' });
+        if (msgPrive.trim()) {
+          try { await sock.sendMessage(numero + '@s.whatsapp.net', { text: msgPrive }); } catch (e) { console.log('Erreur msg prive :', e.message); }
+        }
       } catch (e) {
         resultats.push({ numero, nom: client.nom, status: 'erreur', message: e.message });
         continue;
@@ -1570,7 +1570,6 @@ async function traiterEdition(msg, idOriginal, nouveauTexte, canal) {
   state.historique_edits = state.historique_edits || [];
   state.historique_edits.push(entreeHistorique);
   sauvegarderEtat(); io.emit('update', state);
-  await verifierSeuils();
 
   if (stockTotalRestant() === 0) {
     state.venteActive = false; sauvegarderEtat();
@@ -1578,6 +1577,20 @@ async function traiterEdition(msg, idOriginal, nouveauTexte, canal) {
   }
 }
 
+
+// ---------- API REGLAGES (messages personnalisables) ----------
+app.get('/api/reglages', requireAuth, (req, res) => {
+  res.json({ reglages, defauts: reglagesParDefaut() });
+});
+
+app.post('/api/reglages', requireAuth, (req, res) => {
+  const nouveaux = normaliserReglages({ ...reglages, ...(req.body || {}) });
+  try { fs.writeFileSync(REGLAGES_FILE, JSON.stringify(nouveaux, null, 2)); }
+  catch (e) { return res.status(500).json({ error: 'Sauvegarde impossible : ' + e.message }); }
+  reglages = nouveaux;
+  console.log('Reglages des messages mis a jour');
+  res.json({ ok: true, reglages });
+});
 
 // ---------- API GROUPES ----------
 app.get('/api/groupes', requireAuth, (req, res) => {

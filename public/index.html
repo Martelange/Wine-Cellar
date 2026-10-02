@@ -147,6 +147,7 @@
       <div class="dot waiting" id="wa-dot"></div>
       <span id="wa-label">Connexion...</span>
     </div>
+    <button class="logout-btn" onclick="ouvrirReglages()" title="Réglages des messages" style="font-size:1rem;padding:2px 8px;">⚙️</button>
     <button class="logout-btn" onclick="logout()">Déconnexion</button>
   </header>
 
@@ -321,6 +322,29 @@
     <div style="display:flex;gap:8px;margin-top:14px;">
       <button onclick="fermerModalModifier()" style="flex:1;padding:9px;border-radius:8px;border:none;background:#3d2010;color:#c9956a;cursor:pointer;">Annuler</button>
       <button onclick="soumettreModification()" style="flex:1;padding:9px;border-radius:8px;border:none;background:#4caf50;color:white;cursor:pointer;font-weight:600;">✅ Enregistrer</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal réglages des messages -->
+<div id="modal-reglages" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:100;align-items:center;justify-content:center;">
+  <div style="background:#2d1a0a;border:1px solid #5c3317;border-radius:14px;padding:24px;width:620px;max-width:94vw;max-height:92vh;overflow-y:auto;">
+    <h3 style="color:#f5c842;margin-bottom:6px;">⚙️ Réglages des messages</h3>
+    <p style="font-size:.78rem;color:#c9956a;margin-bottom:16px;">Les mots entre accolades sont remplacés automatiquement. Laisser un message vide = il n'est pas envoyé.</p>
+
+    <label style="font-size:.85rem;font-weight:600;color:#f5e6d0;">🏁 Message final (groupe, ~20 s après le sticker Sold Out)</label>
+    <div style="font-size:.72rem;color:#c9956a;margin:4px 0 6px;">Variables : <b>{duree}</b> durée de la vente · <b>{bouteilles}</b> total vendu · <b>{commandes}</b> nombre de commandes</div>
+    <textarea id="reglage-message-fin" rows="9" style="width:100%;background:#1a0a00;border:1px solid #5c3317;border-radius:8px;padding:10px;color:#f5e6d0;font-family:inherit;font-size:.85rem;resize:vertical;"></textarea>
+    <button onclick="retablirReglage('messageFin')" style="background:none;border:none;color:#c9956a;font-size:.75rem;cursor:pointer;margin-bottom:14px;">↺ Rétablir le texte par défaut</button>
+
+    <label style="font-size:.85rem;font-weight:600;color:#f5e6d0;display:block;">👤 Message privé aux nouveaux clients (envoyé à la création des SO Odoo, si le client n'existe pas dans Odoo)</label>
+    <div style="font-size:.72rem;color:#c9956a;margin:4px 0 6px;">Variable : <b>{nom}</b> nom WhatsApp du client (peut être vide)</div>
+    <textarea id="reglage-message-nouveau-client" rows="11" style="width:100%;background:#1a0a00;border:1px solid #5c3317;border-radius:8px;padding:10px;color:#f5e6d0;font-family:inherit;font-size:.85rem;resize:vertical;"></textarea>
+    <button onclick="retablirReglage('messageNouveauClient')" style="background:none;border:none;color:#c9956a;font-size:.75rem;cursor:pointer;">↺ Rétablir le texte par défaut</button>
+
+    <div style="display:flex;gap:8px;margin-top:16px;">
+      <button onclick="fermerReglages()" style="flex:1;padding:9px;border-radius:8px;border:none;background:#3d2010;color:#c9956a;cursor:pointer;">Annuler</button>
+      <button id="btn-enregistrer-reglages" onclick="enregistrerReglages()" style="flex:1;padding:9px;border-radius:8px;border:none;background:#4caf50;color:white;cursor:pointer;font-weight:600;">✅ Enregistrer</button>
     </div>
   </div>
 </div>
@@ -1332,6 +1356,43 @@ function confirmerChangementGroupe(groupe) {
     if (d.ok) { groupeActifId = groupe.id; afficherGroupeActif(); }
     else alert('Erreur : ' + (d.error || 'inconnue'));
   }).catch(() => alert('Erreur réseau'));
+}
+
+// ── RÉGLAGES DES MESSAGES ─────────────────────────────────────
+// Textes remplis via .value (jamais innerHTML) : conforme à la règle D8/P4.
+const CHAMPS_REGLAGES = { messageFin: 'reglage-message-fin', messageNouveauClient: 'reglage-message-nouveau-client' };
+let reglagesDefauts = {};
+
+function ouvrirReglages() {
+  authFetch('/api/reglages').then(r => r.json()).then(d => {
+    if (!d.reglages) { alert('Erreur : ' + (d.error || 'réglages indisponibles')); return; }
+    reglagesDefauts = d.defauts || {};
+    for (const cle in CHAMPS_REGLAGES) document.getElementById(CHAMPS_REGLAGES[cle]).value = d.reglages[cle] || '';
+    document.getElementById('modal-reglages').style.display = 'flex';
+  }).catch(() => alert('Erreur réseau'));
+}
+
+function fermerReglages() { document.getElementById('modal-reglages').style.display = 'none'; }
+
+function retablirReglage(cle) {
+  if (typeof reglagesDefauts[cle] === 'string') document.getElementById(CHAMPS_REGLAGES[cle]).value = reglagesDefauts[cle];
+}
+
+function enregistrerReglages() {
+  const corps = {};
+  for (const cle in CHAMPS_REGLAGES) corps[cle] = document.getElementById(CHAMPS_REGLAGES[cle]).value;
+  const vides = [];
+  if (!corps.messageFin.trim()) vides.push('le message final');
+  if (!corps.messageNouveauClient.trim()) vides.push('le message aux nouveaux clients');
+  if (vides.length && !confirm('⚠️ ' + vides.join(' et ') + (vides.length > 1 ? ' sont vides : ils ne seront plus envoyés.' : ' est vide : il ne sera plus envoyé.') + '\n\nContinuer ?')) return;
+  const btn = document.getElementById('btn-enregistrer-reglages');
+  btn.disabled = true;
+  authFetch('/api/reglages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(corps) })
+    .then(r => r.json()).then(d => {
+      if (d.ok) fermerReglages();
+      else alert('Erreur : ' + (d.error || 'inconnue'));
+    }).catch(() => alert('Erreur réseau'))
+    .finally(() => { btn.disabled = false; });
 }
 
 </script>
