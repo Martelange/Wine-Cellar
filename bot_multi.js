@@ -1339,12 +1339,16 @@ async function demarrerWhatsApp() {
         || msg.message?.listResponseMessage?.title
         || '';
 
-      // Capturer le sticker sold-out si pas encore enregistré
-      if (msg.message?.stickerMessage && !fs.existsSync(STICKER_FILE)) {
+      // Capture du sticker sold-out : uniquement quand l'operateur l'a demande depuis les
+      // Reglages (fenetre de 5 min). Avant le 02/10/2026, le premier sticker recu apres la
+      // perte du fichier etait capture en silence -> un sticker quelconque avait remplace le bon.
+      if (msg.message?.stickerMessage && captureStickerJusqua > Date.now()) {
         try {
           const buffer = await downloadMediaMessage(msg, 'buffer', {});
           fs.writeFileSync(STICKER_FILE, buffer);
-          console.log('Sticker capture !');
+          captureStickerJusqua = 0;
+          console.log('Sticker sold-out capture (envoye par ' + (msg.key.participant || msg.key.remoteJid || '?').split('@')[0] + ')');
+          io.emit('sticker_capture');
         } catch (e) { console.log('Sticker :', e.message); }
         continue;
       }
@@ -1590,6 +1594,27 @@ app.post('/api/reglages', requireAuth, (req, res) => {
   reglages = nouveaux;
   console.log('Reglages des messages mis a jour');
   res.json({ ok: true, reglages });
+});
+
+// ---------- API STICKER SOLD OUT ----------
+let captureStickerJusqua = 0;   // horodatage de fin de la fenetre de capture (0 = inactive)
+const DUREE_CAPTURE_STICKER = 5 * 60 * 1000;
+
+app.get('/api/sticker', requireAuth, (req, res) => {
+  if (!fs.existsSync(STICKER_FILE)) return res.status(404).json({ error: 'Aucun sticker enregistre' });
+  res.type('image/webp').send(fs.readFileSync(STICKER_FILE));
+});
+
+app.get('/api/sticker/capture', requireAuth, (req, res) => {
+  res.json({ active: captureStickerJusqua > Date.now(), jusqua: captureStickerJusqua });
+});
+
+app.post('/api/sticker/capture', requireAuth, (req, res) => {
+  if (req.body && req.body.annuler) { captureStickerJusqua = 0; return res.json({ ok: true, active: false }); }
+  if (state.venteActive) return res.status(400).json({ error: 'Impossible pendant une vente active.' });
+  captureStickerJusqua = Date.now() + DUREE_CAPTURE_STICKER;
+  console.log('Capture du sticker sold-out armee pour 5 min');
+  res.json({ ok: true, active: true, jusqua: captureStickerJusqua });
 });
 
 // ---------- API GROUPES ----------

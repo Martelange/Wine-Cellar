@@ -332,6 +332,18 @@
     <h3 style="color:#f5c842;margin-bottom:6px;">⚙️ Réglages des messages</h3>
     <p style="font-size:.78rem;color:#c9956a;margin-bottom:16px;">Les mots entre accolades sont remplacés automatiquement. Laisser un message vide = il n'est pas envoyé.</p>
 
+    <label style="font-size:.85rem;font-weight:600;color:#f5e6d0;">🔴 Sticker Sold Out (envoyé quand tout est vendu)</label>
+    <div style="display:flex;align-items:center;gap:14px;margin:8px 0 18px;">
+      <div style="width:96px;height:96px;flex-shrink:0;border:1px solid #5c3317;border-radius:8px;display:flex;align-items:center;justify-content:center;background:#1a0a00;">
+        <img id="reglage-sticker-img" alt="Sticker actuel" style="max-width:90px;max-height:90px;display:none;">
+        <span id="reglage-sticker-vide" style="font-size:.7rem;color:#c9956a;text-align:center;">Aucun sticker<br>(texte « SOLD OUT ! »)</span>
+      </div>
+      <div style="flex:1;">
+        <button id="btn-capturer-sticker" onclick="capturerSticker()" style="background:#5c3317;border:none;color:#f5e6d0;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:.8rem;">🔄 Changer le sticker</button>
+        <div id="reglage-sticker-info" style="font-size:.75rem;color:#c9956a;margin-top:6px;"></div>
+      </div>
+    </div>
+
     <label style="font-size:.85rem;font-weight:600;color:#f5e6d0;">🏁 Message final (groupe, ~20 s après le sticker Sold Out)</label>
     <div style="font-size:.72rem;color:#c9956a;margin:4px 0 6px;">Variables : <b>{duree}</b> durée de la vente · <b>{bouteilles}</b> total vendu · <b>{commandes}</b> nombre de commandes</div>
     <textarea id="reglage-message-fin" rows="9" style="width:100%;background:#1a0a00;border:1px solid #5c3317;border-radius:8px;padding:10px;color:#f5e6d0;font-family:inherit;font-size:.85rem;resize:vertical;"></textarea>
@@ -515,6 +527,10 @@ function initDashboard() {
   chargerGroupes();
   socket.on('update', updateUI);
   socket.on('nouvelle_commande', c=>{ if(!state)return; ajouterLigneCmd(c,state.commandes.length,true); });
+  socket.on('sticker_capture', ()=>{
+    afficherEtatCapture(false); afficherSticker();
+    const info=document.getElementById('reglage-sticker-info'); info.textContent='✅ Nouveau sticker enregistré'; info.style.color='#4caf50';
+  });
   socket.on('sold_out', ()=>{ document.getElementById('status-dot').className='dot sold'; });
   socket.on('doublons_detectes', suspects=>{
     const el=document.getElementById('doublons-alert');
@@ -1369,7 +1385,45 @@ function ouvrirReglages() {
     reglagesDefauts = d.defauts || {};
     for (const cle in CHAMPS_REGLAGES) document.getElementById(CHAMPS_REGLAGES[cle]).value = d.reglages[cle] || '';
     document.getElementById('modal-reglages').style.display = 'flex';
+    afficherSticker();
+    authFetch('/api/sticker/capture').then(r => r.json()).then(c => afficherEtatCapture(c.active)).catch(() => {});
   }).catch(() => alert('Erreur réseau'));
+}
+
+// Aperçu du sticker actuel (blob + URL locale : la route exige le jeton, une <img src> simple ne l'envoie pas)
+let stickerUrl = null;
+function afficherSticker() {
+  const img = document.getElementById('reglage-sticker-img');
+  const vide = document.getElementById('reglage-sticker-vide');
+  authFetch('/api/sticker').then(r => r.ok ? r.blob() : null).then(b => {
+    if (stickerUrl) { URL.revokeObjectURL(stickerUrl); stickerUrl = null; }
+    if (b) { stickerUrl = URL.createObjectURL(b); img.src = stickerUrl; img.style.display = ''; vide.style.display = 'none'; }
+    else { img.style.display = 'none'; vide.style.display = ''; }
+  }).catch(() => {});
+}
+
+function afficherEtatCapture(active) {
+  const btn = document.getElementById('btn-capturer-sticker');
+  const info = document.getElementById('reglage-sticker-info');
+  if (active) {
+    btn.textContent = '✕ Annuler';
+    info.textContent = '⏳ En attente : envoie maintenant le bon sticker au bot en message privé WhatsApp (5 min max).';
+    info.style.color = '#ff9800';
+  } else {
+    btn.textContent = '🔄 Changer le sticker';
+    info.textContent = '';
+    info.style.color = '#c9956a';
+  }
+  btn.dataset.active = active ? '1' : '';
+}
+
+function capturerSticker() {
+  const annuler = document.getElementById('btn-capturer-sticker').dataset.active === '1';
+  authFetch('/api/sticker/capture', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ annuler }) })
+    .then(r => r.json()).then(d => {
+      if (d.ok) afficherEtatCapture(d.active);
+      else alert('Erreur : ' + (d.error || 'inconnue'));
+    }).catch(() => alert('Erreur réseau'));
 }
 
 function fermerReglages() { document.getElementById('modal-reglages').style.display = 'none'; }
